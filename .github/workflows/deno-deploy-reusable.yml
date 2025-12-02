@@ -75,6 +75,21 @@ on:
         required: false
         type: string
         default: ""
+      runtime_env:
+        description: Newline-separated KEY=VALUE lines to forward as --env-var (preferred)
+        required: false
+        type: string
+        default: ""
+      build_env:
+        description: Newline-separated KEY=VALUE lines to export before install/build
+        required: false
+        type: string
+        default: ""
+      runtime_env:
+        description: Newline-separated KEY=VALUE lines to forward as --env-var (preferred)
+        required: false
+        type: string
+        default: ""
       required_env:
         description: Newline-separated env vars that must be present to deploy
         required: false
@@ -120,6 +135,8 @@ jobs:
       INCLUDE: ${{ inputs.include }}
       EXCLUDE: ${{ inputs.exclude }}
       RUNTIME_ENV_KEYS: ${{ inputs.env_var_keys }}
+      RUNTIME_ENV: ${{ inputs.runtime_env }}
+      BUILD_ENV: ${{ inputs.build_env }}
       REQUIRED_ENV: ${{ inputs.required_env }}
       BUILD_COMMAND: ${{ inputs.build_command }}
       INSTALL_COMMAND: ${{ inputs.install_command }}
@@ -182,6 +199,12 @@ jobs:
           else
             echo "deploy=yes" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Export build env
+        if: steps.preflight.outputs.deploy == 'yes' && env.BUILD_ENV != ''
+        run: |
+          set -euo pipefail
+          echo "$BUILD_ENV" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         if: steps.preflight.outputs.deploy == 'yes' && env.INSTALL_COMMAND != ''
@@ -250,6 +273,16 @@ jobs:
               echo "::warning::Requested env $key for deploy but it is empty"
             fi
           done <<< "$RUNTIME_ENV_KEYS"
+
+          while IFS= read -r line; do
+            line=$(echo "$line" | tr -d '\r')
+            [ -z "$line" ] && continue
+            if ! printf '%s\n' "$line" | grep -q '='; then
+              echo "::warning::runtime_env line missing '=': $line"
+              continue
+            fi
+            flags+=("--env-var=$line")
+          done <<< "$RUNTIME_ENV"
 
           deployctl deploy "${flags[@]}"
 
