@@ -1,0 +1,331 @@
+name: Reusable - Deno Deploy
+
+on:
+  workflow_call:
+    inputs:
+      project:
+        description: Deno Deploy project name for production
+        required: true
+        type: string
+      preview_project:
+        description: Optional preview project name (defaults to "<project>-preview")
+        required: false
+        type: string
+        default: ""
+      entrypoint:
+        description: Entrypoint file passed to deployctl (relative to root)
+        required: true
+        type: string
+      root:
+        description: Directory to deploy from
+        required: false
+        type: string
+        default: "."
+      deno_version:
+        description: Deno version range
+        required: false
+        type: string
+        default: v2.x
+      deployctl_version:
+        description: deployctl version to install
+        required: false
+        type: string
+        default: "1.12.0"
+      install_command:
+        description: Optional install command (multi-line allowed)
+        required: false
+        type: string
+        default: ""
+      build_command:
+        description: Optional build command (multi-line allowed)
+        required: false
+        type: string
+        default: ""
+      node_version:
+        description: Set to install Node.js (empty to skip)
+        required: false
+        type: string
+        default: ""
+      bun_version:
+        description: Set to install Bun (empty to skip)
+        required: false
+        type: string
+        default: ""
+      include:
+        description: Newline-separated include globs for deployctl
+        required: false
+        type: string
+        default: ""
+      exclude:
+        description: Newline-separated exclude globs for deployctl
+        required: false
+        type: string
+        default: |
+          .git
+          .github
+          node_modules
+          dist
+          build
+          coverage
+          .turbo
+          .next
+          .vercel
+      env_var_keys:
+        description: Newline-separated env var names to forward as --env-var
+        required: false
+        type: string
+        default: ""
+      required_env:
+        description: Newline-separated env vars that must be present to deploy
+        required: false
+        type: string
+        default: |
+          DENO_DEPLOY_TOKEN
+      prod_branch:
+        description: Branch name for production deploy (defaults to repo default branch)
+        required: false
+        type: string
+        default: ""
+      verify_url:
+        description: Probe the deployed URL after deploy
+        required: false
+        type: boolean
+        default: true
+      create_preview:
+        description: Create preview project when missing
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      DENO_DEPLOY_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: Deno Deploy
+    runs-on: ubuntu-22.04
+    concurrency:
+      group: deno-deploy-${{ inputs.project }}-${{ github.ref }}
+      cancel-in-progress: true
+    env:
+      PROD_BRANCH: ${{ inputs.prod_branch || github.event.repository.default_branch || 'main' }}
+      PROJECT: ${{ inputs.project }}
+      PREVIEW_PROJECT: ${{ inputs.preview_project }}
+      ENTRYPOINT: ${{ inputs.entrypoint }}
+      ROOT_DIR: ${{ inputs.root }}
+      INCLUDE: ${{ inputs.include }}
+      EXCLUDE: ${{ inputs.exclude }}
+      RUNTIME_ENV_KEYS: ${{ inputs.env_var_keys }}
+      REQUIRED_ENV: ${{ inputs.required_env }}
+      BUILD_COMMAND: ${{ inputs.build_command }}
+      INSTALL_COMMAND: ${{ inputs.install_command }}
+      CREATE_PREVIEW: ${{ inputs.create_preview }}
+      VERIFY_URL: ${{ inputs.verify_url }}
+      DENO_VERSION: ${{ inputs.deno_version }}
+      DEPLOYCTL_VERSION: ${{ inputs.deployctl_version }}
+      NODE_VERSION: ${{ inputs.node_version }}
+      BUN_VERSION: ${{ inputs.bun_version }}
+      DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ env.DENO_VERSION }}
+
+      - name: Set up Node.js (optional)
+        if: env.NODE_VERSION != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Set up Bun (optional)
+        if: env.BUN_VERSION != ''
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install deployctl
+        run: |
+          set -euo pipefail
+          deno install -gArf jsr:@deno/deployctl@${{ env.DEPLOYCTL_VERSION }}
+          echo "${HOME}/.deno/bin" >> "$GITHUB_PATH"
+
+      - name: Preflight (token and required env)
+        id: preflight
+        run: |
+          set -euo pipefail
+          missing=()
+          while IFS= read -r key; do
+            key=$(echo "$key" | tr -d '\r' | xargs)
+            [ -z "$key" ] && continue
+            if [ -z "${!key:-}" ]; then
+              missing+=("$key")
+            fi
+          done <<< "$REQUIRED_ENV"
+
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "deploy=no" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Deno Deploy"
+              echo ""
+              echo "- Skipped: missing env vars -> ${missing[*]}"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "deploy=yes" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies
+        if: steps.preflight.outputs.deploy == 'yes' && env.INSTALL_COMMAND != ''
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$INSTALL_COMMAND" | bash
+
+      - name: Build
+        if: steps.preflight.outputs.deploy == 'yes' && env.BUILD_COMMAND != ''
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$BUILD_COMMAND" | bash
+
+      - name: Deploy to Deno Deploy
+        if: steps.preflight.outputs.deploy == 'yes'
+        id: deploy
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          project="$PROJECT"
+          preview="$PREVIEW_PROJECT"
+          if [ -z "$preview" ]; then
+            preview="${project}-preview"
+          fi
+
+          mode="preview"
+          target="$preview"
+          if [ "$REF_NAME" = "$PROD_BRANCH" ]; then
+            mode="production"
+            target="$project"
+          fi
+
+          flags=(
+            "--project=$target"
+            "--entrypoint=$ENTRYPOINT"
+            "--root=$ROOT_DIR"
+            "--token=$DENO_DEPLOY_TOKEN"
+          )
+
+          if [ "$mode" = "production" ]; then
+            flags+=("--prod")
+          elif [ "$CREATE_PREVIEW" = "true" ]; then
+            flags+=("--create")
+          fi
+
+          while IFS= read -r inc; do
+            inc=$(echo "$inc" | tr -d '\r' | xargs)
+            [ -z "$inc" ] && continue
+            flags+=("--include=$inc")
+          done <<< "$INCLUDE"
+
+          while IFS= read -r exc; do
+            exc=$(echo "$exc" | tr -d '\r' | xargs)
+            [ -z "$exc" ] && continue
+            flags+=("--exclude=$exc")
+          done <<< "$EXCLUDE"
+
+          while IFS= read -r key; do
+            key=$(echo "$key" | tr -d '\r' | xargs)
+            [ -z "$key" ] && continue
+            val="${!key:-}"
+            if [ -n "$val" ]; then
+              flags+=("--env-var=${key}=${val}")
+            else
+              echo "::warning::Requested env $key for deploy but it is empty"
+            fi
+          done <<< "$RUNTIME_ENV_KEYS"
+
+          deployctl deploy "${flags[@]}"
+
+          echo "project=$target" >> "$GITHUB_OUTPUT"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+
+      - name: Determine deployed URL
+        if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true'
+        id: deployed_url
+        run: |
+          set -euo pipefail
+          project="${{ steps.deploy.outputs.project }}"
+          fallback="https://${project}.deno.dev"
+          resp=$(curl -sS -H "Authorization: Bearer $DENO_DEPLOY_TOKEN" "https://dash.deno.com/api/projects/${project}" || true)
+          URL=$(PROJECT="$project" FALLBACK="$fallback" RESP="$resp" python - <<'PY'
+import json, os, sys
+resp = os.environ.get("RESP", "")
+fallback = os.environ.get("FALLBACK", "")
+url = fallback
+try:
+    data = json.loads(resp or "{}")
+    domains = data.get("domains") or []
+    if isinstance(domains, list) and domains:
+        dom = domains[0]
+        if isinstance(dom, dict):
+            dom = dom.get("domain") or dom.get("name") or ""
+        if dom:
+            url = f"https://{dom}"
+except Exception as exc:  # noqa: BLE001
+    sys.stderr.write(f"Warning: failed to parse project domains: {exc}\n")
+print(url, end="")
+PY
+)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Verify deployment
+        if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true'
+        id: verify
+        run: |
+          set -euo pipefail
+          url='${{ steps.deployed_url.outputs.url }}'
+          codes_ok="200 301 302 308"
+          status="warn"
+          http_code="000"
+          for i in 1 2 3; do
+            http_code=$(curl -sS -o /dev/null -w "%{http_code}" "$url" || echo "000")
+            if echo "$codes_ok" | grep -q "\b$http_code\b"; then
+              status="ok"
+              break
+            fi
+            sleep 5
+          done
+          echo "http_code=$http_code" >> "$GITHUB_OUTPUT"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          if [ "$status" != "ok" ]; then
+            echo "::warning::Deployment probe returned HTTP $http_code"
+          fi
+
+      - name: Summary
+        if: steps.preflight.outputs.deploy == 'yes'
+        run: |
+          mode='${{ steps.deploy.outputs.mode }}'
+          project='${{ steps.deploy.outputs.project }}'
+          url='${{ steps.deployed_url.outputs.url || '' }}'
+          http='${{ steps.verify.outputs.http_code || '' }}'
+          status='${{ steps.verify.outputs.status || '' }}'
+          {
+            echo "### Deno Deploy"
+            echo ""
+            echo "- Mode: ${mode:-unknown}"
+            echo "- Project: ${project}"
+            if [ -n "$url" ]; then
+              echo "- URL: ${url}"
+            fi
+            if [ -n "$http" ]; then
+              echo "- HTTP: ${http} (${status})"
+            fi
+            echo "- Ref: ${GITHUB_REF##*/}"
+          } >> "$GITHUB_STEP_SUMMARY"
