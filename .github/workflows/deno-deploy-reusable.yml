@@ -341,9 +341,9 @@ PY
         run: |
           mode='${{ steps.deploy.outputs.mode }}'
           project='${{ steps.deploy.outputs.project }}'
-          url='${{ steps.deployed_url.outputs.url || '' }}'
-          http='${{ steps.verify.outputs.http_code || '' }}'
-          status='${{ steps.verify.outputs.status || '' }}'
+          url="${{ steps.deployed_url.outputs.url || '' }}"
+          http="${{ steps.verify.outputs.http_code || '' }}"
+          status="${{ steps.verify.outputs.status || '' }}"
           {
             echo "### Deno Deploy"
             echo ""
