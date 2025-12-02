@@ -159,11 +159,13 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
-      - name: Set up Bun (optional)
+      - name: Install Bun (optional)
         if: env.BUN_VERSION != ''
-        uses: oven-sh/setup-bun@v1
-        with:
-          bun-version: ${{ env.BUN_VERSION }}
+        run: |
+          set -euo pipefail
+          # Use the official install script to avoid setup-bun cache/download flakes.
+          BUN_VERSION="${BUN_VERSION}" curl -fsSL https://bun.sh/install | bash
+          echo "${HOME}/.bun/bin" >> "$GITHUB_PATH"
 
       - name: Install deployctl
         run: |
