@@ -301,22 +301,27 @@ jobs:
           fallback="https://${project}.deno.dev"
           resp=$(curl -sS -H "Authorization: Bearer $DENO_DEPLOY_TOKEN" "https://dash.deno.com/api/projects/${project}" || true)
           URL=$(PROJECT="$project" FALLBACK="$fallback" RESP="$resp" python - <<'PY'
-import json, os, sys
-resp = os.environ.get("RESP", "")
-fallback = os.environ.get("FALLBACK", "")
-url = fallback
-try:
-    data = json.loads(resp or "{}")
-    domains = data.get("domains") or []
-    if isinstance(domains, list) and domains:
-        dom = domains[0]
-        if isinstance(dom, dict):
-            dom = dom.get("domain") or dom.get("name") or ""
-        if dom:
-            url = f"https://{dom}"
-except Exception as exc:  # noqa: BLE001
-    sys.stderr.write(f"Warning: failed to parse project domains: {exc}\n")
-print(url, end="")
+            import json, os, sys, textwrap
+
+            code = """
+            resp = os.environ.get("RESP", "")
+            fallback = os.environ.get("FALLBACK", "")
+            url = fallback
+            try:
+                data = json.loads(resp or "{}")
+                domains = data.get("domains") or []
+                if isinstance(domains, list) and domains:
+                    dom = domains[0]
+                    if isinstance(dom, dict):
+                        dom = dom.get("domain") or dom.get("name") or ""
+                    if dom:
+                        url = f"https://{dom}"
+            except Exception as exc:  # noqa: BLE001
+                sys.stderr.write(f"Warning: failed to parse project domains: {exc}\\n")
+            print(url, end="")
+            """
+
+            exec(textwrap.dedent(code))
           PY
           )
           echo "url=$URL" >> "$GITHUB_OUTPUT"
