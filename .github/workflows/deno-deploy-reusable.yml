@@ -85,11 +85,6 @@ on:
         required: false
         type: string
         default: ""
-      runtime_env:
-        description: Newline-separated KEY=VALUE lines to forward as --env-var (preferred)
-        required: false
-        type: string
-        default: ""
       required_env:
         description: Newline-separated env vars that must be present to deploy
         required: false
