@@ -4,11 +4,12 @@ on:
   workflow_call:
     inputs:
       project:
-        description: Deno Deploy project name for production
-        required: true
+        description: Optional Deno Deploy project name for production (defaults to derived from repository name)
+        required: false
         type: string
+        default: ""
       preview_project:
-        description: Optional preview project name (defaults to "<project>-preview")
+        description: Optional preview project name (defaults to "preview-<project>")
         required: false
         type: string
         default: ""
@@ -85,14 +86,29 @@ on:
         required: false
         type: string
         default: ""
+      ensure_project:
+        description: Ensure the target project exists via Deno Deploy API before deploying
+        required: false
+        type: boolean
+        default: true
+      project_secrets:
+        description: Newline-separated SECRET_NAME=ENV_VAR mappings to persist as Deno Deploy secrets (production and fallback)
+        required: false
+        type: string
+        default: ""
+      preview_project_secrets:
+        description: Optional SECRET_NAME=ENV_VAR mappings for preview deployments (overrides project_secrets)
+        required: false
+        type: string
+        default: ""
       required_env:
         description: Newline-separated env vars that must be present to deploy
         required: false
         type: string
         default: |
           DENO_DEPLOY_TOKEN
-      prod_branch:
-        description: Branch name for production deploy (defaults to repo default branch)
+      submodules:
+        description: Submodules checkout mode (empty to skip, 'recursive' for recursive)
         required: false
         type: string
         default: ""
@@ -106,9 +122,18 @@ on:
         required: false
         type: boolean
         default: true
+      prod_branch:
+        description: Branch name for production deployments
+        required: false
+        type: string
+        default: ""
     secrets:
       DENO_DEPLOY_TOKEN:
         required: true
+      DENO_PROJECT_SECRETS:
+        required: false
+      DENO_PREVIEW_PROJECT_SECRETS:
+        required: false
 
 permissions:
   contents: read
@@ -122,7 +147,7 @@ jobs:
       group: deno-deploy-${{ inputs.project }}-${{ github.ref }}
       cancel-in-progress: true
     env:
-      PROD_BRANCH: ${{ inputs.prod_branch || github.event.repository.default_branch || 'main' }}
+      PROD_BRANCH: ${{ inputs.prod_branch != '' && inputs.prod_branch || github.event.repository.default_branch }}
       PROJECT: ${{ inputs.project }}
       PREVIEW_PROJECT: ${{ inputs.preview_project }}
       ENTRYPOINT: ${{ inputs.entrypoint }}
@@ -132,6 +157,9 @@ jobs:
       RUNTIME_ENV_KEYS: ${{ inputs.env_var_keys }}
       RUNTIME_ENV: ${{ inputs.runtime_env }}
       BUILD_ENV: ${{ inputs.build_env }}
+      ENSURE_PROJECT: ${{ inputs.ensure_project }}
+      PROJECT_SECRETS: ${{ inputs.project_secrets != '' && inputs.project_secrets || secrets.DENO_PROJECT_SECRETS || '' }}
+      PREVIEW_PROJECT_SECRETS: ${{ inputs.preview_project_secrets != '' && inputs.preview_project_secrets || secrets.DENO_PREVIEW_PROJECT_SECRETS || '' }}
       REQUIRED_ENV: ${{ inputs.required_env }}
       BUILD_COMMAND: ${{ inputs.build_command }}
       INSTALL_COMMAND: ${{ inputs.install_command }}
@@ -146,6 +174,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          submodules: ${{ inputs.submodules }}
 
       - name: Set up Deno
         uses: denoland/setup-deno@v2
@@ -197,6 +227,37 @@ jobs:
             echo "deploy=yes" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Determine target project
+        if: steps.preflight.outputs.deploy == 'yes'
+        id: target
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          project="$PROJECT"
+          preview="$PREVIEW_PROJECT"
+          if [ -z "$preview" ]; then
+            preview="${project}-preview"
+          fi
+          if [ ${#project} -gt 26 ]; then
+            echo "::error::Base project name '${project}' exceeds 26 characters (Deno Deploy's max project name character limit)"
+            exit 1
+          fi
+          if [ ${#preview} -gt 26 ]; then
+            echo "::error::Preview project name '${preview}' exceeds 26 characters (Deno Deploy's max project name character limit)"
+            exit 1
+          fi
+
+          mode="preview"
+          target="$preview"
+          if [ "$REF_NAME" = "$PROD_BRANCH" ]; then
+            mode="production"
+            target="$project"
+          fi
+
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "project=$target" >> "$GITHUB_OUTPUT"
+
       - name: Export build env
         if: steps.preflight.outputs.deploy == 'yes' && env.BUILD_ENV != ''
         run: |
@@ -215,25 +276,103 @@ jobs:
           set -euo pipefail
           printf '%s\n' "$BUILD_COMMAND" | bash
 
+      - name: Ensure project exists and sync secrets
+        if: steps.preflight.outputs.deploy == 'yes'
+        env:
+          MODE: ${{ steps.target.outputs.mode }}
+          TARGET_PROJECT: ${{ steps.target.outputs.project }}
+        run: |
+          set -euo pipefail
+          project="$TARGET_PROJECT"
+          mode="$MODE"
+          if [ -z "$project" ]; then
+            echo "::error::Target project was not resolved"
+            exit 1
+          fi
+
+          secrets_block="$PROJECT_SECRETS"
+          if [ "$mode" = "preview" ] && [ -n "$PREVIEW_PROJECT_SECRETS" ]; then
+            secrets_block="$PREVIEW_PROJECT_SECRETS"
+          fi
+
+          if [ "$ENSURE_PROJECT" != "true" ] && [ -z "$secrets_block" ]; then
+            echo "Skipping project ensure/secret sync (disabled and no secrets provided)"
+            exit 0
+          fi
+
+          api_base="https://dash.deno.com/api/projects"
+          tmp_resp="$(mktemp)"
+          http_code=$(curl -sS -o "$tmp_resp" -w "%{http_code}" \
+            -H "Authorization: Bearer $DENO_DEPLOY_TOKEN" \
+            "$api_base/$project" || echo "000")
+
+          if [ "$http_code" = "404" ]; then
+            if [ "$ENSURE_PROJECT" != "true" ]; then
+              echo "::error::Project $project not found and ensure_project is false"
+              cat "$tmp_resp" || true
+              exit 1
+            fi
+            http_code=$(curl -sS -o "$tmp_resp" -w "%{http_code}" \
+              -X POST "$api_base" \
+              -H "Authorization: Bearer $DENO_DEPLOY_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"name\":\"$project\"}" || echo "000")
+            if [ "$http_code" -ge 300 ] || [ "$http_code" -lt 200 ]; then
+              echo "::error::Failed to create project $project (HTTP $http_code)"
+              cat "$tmp_resp" || true
+              exit 1
+            fi
+            echo "Created project $project"
+          elif [ "$http_code" != "200" ]; then
+            echo "::error::Failed to fetch project $project (HTTP $http_code)"
+            cat "$tmp_resp" || true
+            exit 1
+          fi
+          rm -f "$tmp_resp"
+
+          if [ -n "$secrets_block" ]; then
+            while IFS= read -r line; do
+              line=$(echo "$line" | tr -d '\r' | xargs)
+              [ -z "$line" ] && continue
+              if ! printf '%s\n' "$line" | grep -q '='; then
+                echo "::warning::project_secrets line missing '=': $line"
+                continue
+              fi
+              secret_name=${line%%=*}
+              env_key=${line#*=}
+              if [ -z "$secret_name" ] || [ -z "$env_key" ]; then
+                echo "::warning::project_secrets line invalid: $line"
+                continue
+              fi
+              val="${!env_key:-}"
+              if [ -z "$val" ]; then
+                echo "::warning::Secret $secret_name skipped because env $env_key is empty"
+                continue
+              fi
+              echo "::add-mask::$val"
+              tmp_secret="$(mktemp)"
+              code=$(curl -sS -o "$tmp_secret" -w "%{http_code}" \
+                -X POST "$api_base/$project/secrets" \
+                -H "Authorization: Bearer $DENO_DEPLOY_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{\"name\":\"$secret_name\",\"value\":\"$val\"}" || echo "000")
+              if [ "$code" != "200" ]; then
+                echo "::error::Failed to set secret $secret_name (HTTP $code)"
+                cat "$tmp_secret" || true
+                rm -f "$tmp_secret"
+                exit 1
+              fi
+              rm -f "$tmp_secret"
+            done <<< "$secrets_block"
+          fi
+
       - name: Deploy to Deno Deploy
         if: steps.preflight.outputs.deploy == 'yes'
         id: deploy
-        env:
-          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          project="$PROJECT"
-          preview="$PREVIEW_PROJECT"
-          if [ -z "$preview" ]; then
-            preview="${project}-preview"
-          fi
-
-          mode="preview"
-          target="$preview"
-          if [ "$REF_NAME" = "$PROD_BRANCH" ]; then
-            mode="production"
-            target="$project"
-          fi
+          mode='${{ steps.target.outputs.mode }}'
+          target='${{ steps.target.outputs.project }}'
 
           flags=(
             "--project=$target"
