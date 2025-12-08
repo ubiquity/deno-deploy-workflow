@@ -1,0 +1,48 @@
+[submodule "lib/audit.ubq.fi"]
+	path = lib/audit.ubq.fi
+	url = https://github.com/ubiquity/audit.ubq.fi.git
+[submodule "lib/card.ubq.fi"]
+	path = lib/card.ubq.fi
+	url = https://github.com/ubiquity/card.ubq.fi.git
+[submodule "lib/demo.ubq.fi"]
+	path = lib/demo.ubq.fi
+	url = https://github.com/ubiquity/demo.ubq.fi.git
+[submodule "lib/health.ubq.fi"]
+	path = lib/health.ubq.fi
+	url = https://github.com/ubiquity/health.ubq.fi.git
+[submodule "lib/keygen.ubq.fi"]
+	path = lib/keygen.ubq.fi
+	url = https://github.com/ubiquity/keygen.ubq.fi.git
+[submodule "lib/leaderboard.ubq.fi"]
+	path = lib/leaderboard.ubq.fi
+	url = https://github.com/ubiquity/leaderboard.ubq.fi.git
+[submodule "lib/notifications.ubq.fi"]
+	path = lib/notifications.ubq.fi
+	url = https://github.com/ubiquity/notifications.ubq.fi.git
+[submodule "lib/onboard.ubq.fi"]
+	path = lib/onboard.ubq.fi
+	url = https://github.com/ubiquity/onboard.ubq.fi.git
+[submodule "lib/partner.ubq.fi"]
+	path = lib/partner.ubq.fi
+	url = https://github.com/ubiquity/partner.ubq.fi.git
+[submodule "lib/pay.ubq.fi"]
+	path = lib/pay.ubq.fi
+	url = https://github.com/ubiquity/pay.ubq.fi.git
+[submodule "lib/permit2-allowance.ubq.fi"]
+	path = lib/permit2-allowance.ubq.fi
+	url = https://github.com/ubiquity/permit2-allowance.ubq.fi.git
+[submodule "lib/safe.ubq.fi"]
+	path = lib/safe.ubq.fi
+	url = https://github.com/ubiquity/safe.ubq.fi.git
+[submodule "lib/stake.ubq.fi"]
+	path = lib/stake.ubq.fi
+	url = https://github.com/ubiquity/stake.ubq.fi.git
+[submodule "lib/uusd.ubq.fi"]
+	path = lib/uusd.ubq.fi
+	url = https://github.com/ubiquity/uusd.ubq.fi.git
+[submodule "lib/work.ubq.fi"]
+	path = lib/work.ubq.fi
+	url = https://github.com/ubiquity/work.ubq.fi.git
+[submodule "lib/xp.ubq.fi"]
+	path = lib/xp.ubq.fi
+	url = https://github.com/ubiquity/xp.ubq.fi.git
