@@ -130,6 +130,10 @@ on:
     secrets:
       DENO_DEPLOY_TOKEN:
         required: true
+      SUPABASE_URL:
+        required: false
+      SUPABASE_ANON_KEY:
+        required: false
       DENO_PROJECT_SECRETS:
         required: false
       DENO_PREVIEW_PROJECT_SECRETS:
@@ -170,6 +174,8 @@ jobs:
       NODE_VERSION: ${{ inputs.node_version }}
       BUN_VERSION: ${{ inputs.bun_version }}
       DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL || '' }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY || '' }}
 
     steps:
       - name: Check out repository
