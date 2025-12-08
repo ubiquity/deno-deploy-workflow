@@ -46,3 +46,6 @@
 [submodule "lib/xp.ubq.fi"]
 	path = lib/xp.ubq.fi
 	url = https://github.com/ubiquity/xp.ubq.fi.git
+[submodule "lib/ubq.fi-router"]
+	path = lib/ubq.fi-router
+	url = https://github.com/ubiquity/ubq.fi-router.git
