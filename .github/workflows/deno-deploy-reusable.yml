@@ -117,6 +117,16 @@ on:
         required: false
         type: boolean
         default: true
+      debug_fetch_paths:
+        description: Optional newline-separated URLs or paths (relative to deployed base URL) to GET after deploy for debugging
+        required: false
+        type: string
+        default: ""
+      debug_fetch_fail:
+        description: Fail the workflow if any debug fetch returns a non-2xx/3xx status
+        required: false
+        type: boolean
+        default: false
       create_preview:
         description: Create preview project when missing
         required: false
@@ -169,6 +179,8 @@ jobs:
       INSTALL_COMMAND: ${{ inputs.install_command }}
       CREATE_PREVIEW: ${{ inputs.create_preview }}
       VERIFY_URL: ${{ inputs.verify_url }}
+      DEBUG_FETCH_PATHS: ${{ inputs.debug_fetch_paths }}
+      DEBUG_FETCH_FAIL: ${{ inputs.debug_fetch_fail }}
       DENO_VERSION: ${{ inputs.deno_version }}
       DEPLOYCTL_VERSION: ${{ inputs.deployctl_version }}
       NODE_VERSION: ${{ inputs.node_version }}
@@ -507,6 +519,46 @@ jobs:
           echo "status=$status" >> "$GITHUB_OUTPUT"
           if [ "$status" != "ok" ]; then
             echo "::warning::Deployment probe returned HTTP $http_code"
+          fi
+
+      - name: Debug fetch paths (optional)
+        if: steps.preflight.outputs.deploy == 'yes' && env.DEBUG_FETCH_PATHS != ''
+        run: |
+          set -euo pipefail
+          base='${{ steps.deployed_url.outputs.url }}'
+          if [ -z "$base" ]; then
+            base="https://${{ steps.deploy.outputs.project }}.deno.dev"
+          fi
+          ok_codes="200 301 302 304 308"
+          misses=()
+          summary=""
+
+          while IFS= read -r raw; do
+            raw=$(echo "$raw" | tr -d '\r' | xargs)
+            [ -z "$raw" ] && continue
+            case "$raw" in
+              http://*|https://*) url="$raw" ;;
+              /*) url="${base%/}$raw" ;;
+              *) url="${base%/}/$raw" ;;
+            esac
+            http_code=$(curl -sS -o /dev/null -w "%{http_code}" "$url" || echo "000")
+            if echo "$ok_codes" | grep -q "\b$http_code\b"; then
+              summary+="- [ok] $url (HTTP $http_code)\n"
+            else
+              summary+="- [miss] $url (HTTP $http_code)\n"
+              misses+=("$url")
+            fi
+          done <<< "$DEBUG_FETCH_PATHS"
+
+          {
+            echo "### Debug fetch"
+            echo ""
+            printf "%b" "$summary"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ ${#misses[@]} -gt 0 ] && [ "${DEBUG_FETCH_FAIL:-false}" = "true" ]; then
+            echo "::error::Debug fetch failures: ${misses[*]}"
+            exit 1
           fi
 
       - name: Summary
