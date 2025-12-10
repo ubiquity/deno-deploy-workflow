@@ -555,11 +555,20 @@ jobs:
           set -euo pipefail
           prod_base='${{ steps.deployed_url.outputs.url }}'
           [ -z "$prod_base" ] && prod_base="https://${{ steps.deploy.outputs.project }}.deno.dev"
-          # Try to derive routed domain (replace trailing .deno.dev with .ubq.fi when present)
+
+          # Derive routed domain from project pattern: <sub>-ubq-fi.deno.dev -> <sub>.ubq.fi
           routed_base=""
-          if echo "$prod_base" | grep -qE '^https://[^/]+\.deno\.dev/?$'; then
-            routed_base="$(echo "$prod_base" | sed 's/\\.deno\\.dev$/.ubq.fi/')"
+          host=$(echo "$prod_base" | sed -n 's#^https://\\([^/]*\\).*#\\1#p')
+          if [ -n "$host" ] && echo "$host" | grep -q -- "-ubq-fi.deno.dev$"; then
+            sub=${host%-ubq-fi.deno.dev}
+            routed_base="https://${sub}.ubq.fi"
           fi
+
+          bases=("$prod_base")
+          if [ -n "$routed_base" ] && [ "$routed_base" != "$prod_base" ]; then
+            bases+=("$routed_base")
+          fi
+
           ok_codes="200 301 302 304 308"
           misses=()
           summary=""
@@ -567,7 +576,7 @@ jobs:
           while IFS= read -r raw; do
             raw=$(echo "$raw" | tr -d '\r' | xargs)
             [ -z "$raw" ] && continue
-            for base in "$prod_base" ${routed_base:+"$routed_base"}; do
+            for base in "${bases[@]}"; do
               case "$raw" in
                 http://*|https://*) url="$raw" ;;
                 /*) url="${base%/}$raw" ;;
