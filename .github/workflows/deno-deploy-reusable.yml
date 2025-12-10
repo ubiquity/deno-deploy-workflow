@@ -549,42 +549,143 @@ jobs:
             echo "::error::Deployment probe returned HTTP $http_code at $url"
           fi
 
-      - name: Debug fetch paths (optional)
-        if: steps.preflight.outputs.deploy == 'yes' && env.DEBUG_FETCH_PATHS != ''
+      - name: Debug fetch paths and assets
+        if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true'
         run: |
           set -euo pipefail
           prod_base='${{ steps.deployed_url.outputs.url }}'
           [ -z "$prod_base" ] && prod_base="https://${{ steps.deploy.outputs.project }}.deno.dev"
 
-          # Derive routed domain from project pattern: <sub>-ubq-fi.deno.dev -> <sub>.ubq.fi
-          routed_base=""
-          host=$(echo "$prod_base" | sed -n 's#^https://\\([^/]*\\).*#\\1#p')
-          if [ -n "$host" ] && echo "$host" | grep -q -- "-ubq-fi.deno.dev$"; then
-            sub=${host%-ubq-fi.deno.dev}
-            routed_base="https://${sub}.ubq.fi"
+          project='${{ steps.deploy.outputs.project }}'
+          deno_base="https://${project}.deno.dev"
+          ubq_base=""
+          if [[ "$project" =~ ^p-(.+)-ubq-fi$ ]]; then
+            ubq_base="https://preview-${BASH_REMATCH[1]}.ubq.fi"
+          elif [[ "$project" =~ ^(.+)-ubq-fi$ ]]; then
+            ubq_base="https://${BASH_REMATCH[1]}.ubq.fi"
           fi
 
-          bases=("$prod_base")
-          if [ -n "$routed_base" ] && [ "$routed_base" != "$prod_base" ]; then
-            bases+=("$routed_base")
-          fi
+          add_base() {
+            local candidate="$1"
+            [ -z "$candidate" ] && return
+            candidate="${candidate%/}"
+            for existing in "${bases[@]:-}"; do
+              if [ "$existing" = "$candidate" ]; then
+                return
+              fi
+            done
+            bases+=("$candidate")
+          }
+
+          bases=()
+          add_base "$prod_base"
+          add_base "$deno_base"
+          add_base "$ubq_base"
 
           ok_codes="200 301 302 304 308"
           misses=()
           summary=""
           seen_urls=()
+          record_seen() {
+            local url="$1"
+            for seen in "${seen_urls[@]:-}"; do
+              if [ "$seen" = "$url" ]; then
+                return
+              fi
+            done
+            seen_urls+=("$url")
+          }
 
+          asset_paths=()
+
+          for base in "${bases[@]}"; do
+            [ -z "$base" ] && continue
+            root="${base%/}/"
+            tmp_html="$(mktemp)"
+            http_code=$(curl -sS -L -w "%{http_code}" -o "$tmp_html" "$root" || echo "000")
+            record_seen "$root"
+            if echo "$ok_codes" | grep -q "\b$http_code\b"; then
+              summary+="- [ok] $root (HTTP $http_code)\n"
+              found_paths=()
+              mapfile -t found_paths < <(HTML_FILE="$tmp_html" BASE="$root" python - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+          from html.parser import HTMLParser
+          from urllib.parse import urljoin, urlparse
+
+          base = os.environ.get("BASE", "")
+          html_path = os.environ.get("HTML_FILE", "")
+          html = Path(html_path).read_text() if html_path else sys.stdin.read()
+          base_host = urlparse(base).netloc
+          paths = set()
+
+          class Extract(HTMLParser):
+              def handle_starttag(self, tag, attrs):
+                  for name, value in attrs:
+                      if name not in ("src", "href"):
+                          continue
+                      if not value or value.startswith(("data:", "mailto:", "tel:", "#", "javascript:")):
+                          continue
+                      abs_url = urljoin(base, value)
+                      parsed = urlparse(abs_url)
+                      if parsed.scheme not in ("http", "https"):
+                          continue
+                      if parsed.netloc and parsed.netloc != base_host:
+                          continue
+                      path = parsed.path or "/"
+                      if parsed.query:
+                          path = f"{path}?{parsed.query}"
+                      paths.add(path)
+
+          Extract().feed(html)
+          for path in sorted(paths):
+              print(path)
+          PY
+              )
+              if [ ${#found_paths[@]} -gt 0 ]; then
+                asset_paths+=("${found_paths[@]}")
+              fi
+            else
+              summary+="- [miss] $root (HTTP $http_code)\n"
+              misses+=("$root")
+            fi
+            rm -f "$tmp_html"
+          done
+
+          if [ ${#asset_paths[@]} -gt 0 ]; then
+            mapfile -t asset_paths < <(printf "%s\n" "${asset_paths[@]}" | awk 'NF && !seen[$0]++')
+          fi
+
+          debug_paths=()
           while IFS= read -r raw; do
             raw=$(echo "$raw" | tr -d '\r' | xargs)
             [ -z "$raw" ] && continue
+            debug_paths+=("$raw")
+          done <<< "$DEBUG_FETCH_PATHS"
+
+          fetch_paths=("${asset_paths[@]}")
+          fetch_paths+=("${debug_paths[@]}")
+          if [ ${#fetch_paths[@]} -gt 0 ]; then
+            mapfile -t fetch_paths < <(printf "%s\n" "${fetch_paths[@]}" | awk 'NF && !seen[$0]++')
+          fi
+
+          for path in "${fetch_paths[@]:-}"; do
             for base in "${bases[@]}"; do
-              case "$raw" in
-                http://*|https://*) url="$raw" ;;
-                /*) url="${base%/}$raw" ;;
-                *) url="${base%/}/$raw" ;;
+              [ -z "$base" ] && continue
+              case "$path" in
+                http://*|https://*) url="$path" ;;
+                /*) url="${base%/}$path" ;;
+                *) url="${base%/}/$path" ;;
               esac
-              # Skip duplicate URLs
-              if printf '%s\n' "${seen_urls[@]}" | grep -Fxq "$url"; then
+              skip=false
+              for seen in "${seen_urls[@]:-}"; do
+                if [ "$seen" = "$url" ]; then
+                  skip=true
+                  break
+                fi
+              done
+              if [ "$skip" = true ]; then
                 continue
               fi
               http_code=$(curl -sS -o /dev/null -w "%{http_code}" "$url" || echo "000")
@@ -594,9 +695,9 @@ jobs:
                 summary+="- [miss] $url (HTTP $http_code)\n"
                 misses+=("$url")
               fi
-              seen_urls+=("$url")
+              record_seen "$url"
             done
-          done <<< "$DEBUG_FETCH_PATHS"
+          done
 
           {
             echo "### Debug fetch"
