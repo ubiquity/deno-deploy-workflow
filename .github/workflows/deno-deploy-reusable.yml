@@ -661,13 +661,7 @@ jobs:
               if [ "$skip" = true ]; then
                 continue
               fi
-              attempt_code="000"
-              for ((i=1; i<=attempts; i++)); do
-                attempt_code=$(curl -sS -o /dev/null -w "%{http_code}" "$url" || echo "000")
-                if echo "$ok_codes" | grep -q "\b$attempt_code\b"; then
-                  break
-                fi
-              done
+              attempt_code=$(curl -sS -o /dev/null -w "%{http_code}" "$url" || echo "000")
 
               if echo "$ok_codes" | grep -q "\b$attempt_code\b"; then
                 summary+="- [ok] $url (HTTP $attempt_code)\n"
