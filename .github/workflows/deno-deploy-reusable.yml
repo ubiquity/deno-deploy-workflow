@@ -188,6 +188,7 @@ jobs:
       DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
       SUPABASE_URL: ${{ secrets.SUPABASE_URL || '' }}
       SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY || '' }}
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org
 
     steps:
       - name: Check out repository
@@ -498,17 +499,18 @@ jobs:
       - name: Verify deployment
         if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true'
         id: verify
+        continue-on-error: true
         run: |
           set -euo pipefail
           url='${{ steps.deployed_url.outputs.url }}'
           if [ -z "$url" ]; then
             url="https://${{ steps.deploy.outputs.project }}.deno.dev"
           fi
-          codes_ok="200 301 302 308"
-          status="warn"
+          codes_ok="200"
+          status="fail"
           http_code="000"
           for _ in 1 2 3; do
-            http_code=$(curl -sS -o /dev/null -w "%{http_code}" "$url" || echo "000")
+            http_code=$(curl -sS -L -o /dev/null -w "%{http_code}" "$url" || echo "000")
             if echo "$codes_ok" | grep -q "\b$http_code\b"; then
               status="ok"
               break
@@ -518,7 +520,7 @@ jobs:
           echo "http_code=$http_code" >> "$GITHUB_OUTPUT"
           echo "status=$status" >> "$GITHUB_OUTPUT"
           if [ "$status" != "ok" ]; then
-            echo "::warning::Deployment probe returned HTTP $http_code"
+            echo "::error::Deployment probe returned HTTP $http_code at $url"
           fi
 
       - name: Debug fetch paths (optional)
@@ -582,3 +584,14 @@ jobs:
             fi
             echo "- Ref: ${GITHUB_REF##*/}"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail on probe failure
+        if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true'
+        run: |
+          status='${{ steps.verify.outputs.status || '' }}'
+          http='${{ steps.verify.outputs.http_code || '' }}'
+          url='${{ steps.deployed_url.outputs.url || '' }}'
+          if [ "$status" != "ok" ]; then
+            echo "::error::Deployment probe failed with HTTP ${http:-unknown} at ${url:-<missing url>}"
+            exit 1
+          fi
