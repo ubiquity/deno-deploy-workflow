@@ -11,6 +11,8 @@
 - Deno Deploy enforces per-hour deployment limits; when pushing several sites back-to-back, expect to rerun the failed jobs after the cooldown rather than editing code.
 - Always include the repo root (`--include="."`) so the entrypoint and `deno.json` ship; build excludes should come from `git ls-files --ignored --exclude-standard`, with per-repo exceptions to keep gitignored build outputs that must deploy (e.g., `static/dist/**`, `dist/**`, `out/**`, `static/bundles/**`, or `public/app.js*`).
 - Use the repo default branch as the production gate; let deployctl include the repo root and build a gitignore-based exclude list, skipping gitignored build artifacts that must ship (e.g., `public/app.js` in `uusd.ubq.fi`).
+- Process discipline: after changing a repo, wait for that repo’s deploy run to succeed before adding lessons here—only propagate guidance that has been validated by a successful deployment so later sub-projects inherit proven steps.
+- Per-project nuance: `lib/pay.ubq.fi` builds the frontend in `frontend/` and serves from `frontend/dist` via `serve.ts`; workflow should run `bun install && bun run build` inside `frontend`, include `frontend/dist/**`, and set runtime `STATIC_DIR=frontend/dist` with build env `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY` (no `static/**` path there).
 
 ## Deno Deploy Debugging Notes
 
