@@ -553,9 +553,12 @@ jobs:
         if: steps.preflight.outputs.deploy == 'yes' && env.DEBUG_FETCH_PATHS != ''
         run: |
           set -euo pipefail
-          base='${{ steps.deployed_url.outputs.url }}'
-          if [ -z "$base" ]; then
-            base="https://${{ steps.deploy.outputs.project }}.deno.dev"
+          prod_base='${{ steps.deployed_url.outputs.url }}'
+          [ -z "$prod_base" ] && prod_base="https://${{ steps.deploy.outputs.project }}.deno.dev"
+          # Try to derive routed domain (replace trailing .deno.dev with .ubq.fi when present)
+          routed_base=""
+          if echo "$prod_base" | grep -qE '^https://[^/]+\.deno\.dev/?$'; then
+            routed_base="$(echo "$prod_base" | sed 's/\\.deno\\.dev$/.ubq.fi/')"
           fi
           ok_codes="200 301 302 304 308"
           misses=()
@@ -564,18 +567,20 @@ jobs:
           while IFS= read -r raw; do
             raw=$(echo "$raw" | tr -d '\r' | xargs)
             [ -z "$raw" ] && continue
-            case "$raw" in
-              http://*|https://*) url="$raw" ;;
-              /*) url="${base%/}$raw" ;;
-              *) url="${base%/}/$raw" ;;
-            esac
-            http_code=$(curl -sS -o /dev/null -w "%{http_code}" "$url" || echo "000")
-            if echo "$ok_codes" | grep -q "\b$http_code\b"; then
-              summary+="- [ok] $url (HTTP $http_code)\n"
-            else
-              summary+="- [miss] $url (HTTP $http_code)\n"
-              misses+=("$url")
-            fi
+            for base in "$prod_base" ${routed_base:+"$routed_base"}; do
+              case "$raw" in
+                http://*|https://*) url="$raw" ;;
+                /*) url="${base%/}$raw" ;;
+                *) url="${base%/}/$raw" ;;
+              esac
+              http_code=$(curl -sS -o /dev/null -w "%{http_code}" "$url" || echo "000")
+              if echo "$ok_codes" | grep -q "\b$http_code\b"; then
+                summary+="- [ok] $url (HTTP $http_code)\n"
+              else
+                summary+="- [miss] $url (HTTP $http_code)\n"
+                misses+=("$url")
+              fi
+            done
           done <<< "$DEBUG_FETCH_PATHS"
 
           {
