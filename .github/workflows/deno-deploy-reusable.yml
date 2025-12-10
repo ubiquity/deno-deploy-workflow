@@ -599,8 +599,8 @@ jobs:
           asset_paths=()
 
           if [ -n "$ubq_base" ]; then
-            # Allow ubq.fi edges a moment to propagate DNS/cache
-            sleep 10
+            echo "Waiting 60s for ubq.fi propagation before probes..."
+            sleep 60
           fi
 
           for base in "${bases[@]}"; do
