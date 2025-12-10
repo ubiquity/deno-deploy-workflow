@@ -572,6 +572,7 @@ jobs:
           ok_codes="200 301 302 304 308"
           misses=()
           summary=""
+          seen_urls=()
 
           while IFS= read -r raw; do
             raw=$(echo "$raw" | tr -d '\r' | xargs)
@@ -582,6 +583,10 @@ jobs:
                 /*) url="${base%/}$raw" ;;
                 *) url="${base%/}/$raw" ;;
               esac
+              # Skip duplicate URLs
+              if printf '%s\n' "${seen_urls[@]}" | grep -Fxq "$url"; then
+                continue
+              fi
               http_code=$(curl -sS -o /dev/null -w "%{http_code}" "$url" || echo "000")
               if echo "$ok_codes" | grep -q "\b$http_code\b"; then
                 summary+="- [ok] $url (HTTP $http_code)\n"
@@ -589,6 +594,7 @@ jobs:
                 summary+="- [miss] $url (HTTP $http_code)\n"
                 misses+=("$url")
               fi
+              seen_urls+=("$url")
             done
           done <<< "$DEBUG_FETCH_PATHS"
 
