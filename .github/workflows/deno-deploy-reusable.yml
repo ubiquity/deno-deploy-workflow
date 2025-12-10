@@ -713,7 +713,7 @@ jobs:
               done
 
               if echo "$ok_codes" | grep -q "\b$attempt_code\b"; then
-                summary+="- [ok] $url (HTTP $http_code)\n"
+                summary+="- [ok] $url (HTTP $attempt_code)\n"
               else
                 summary+="- [miss] $url (HTTP $attempt_code)\n"
                 misses+=("$url")
