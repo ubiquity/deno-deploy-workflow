@@ -11,3 +11,10 @@
 - Deno Deploy enforces per-hour deployment limits; when pushing several sites back-to-back, expect to rerun the failed jobs after the cooldown rather than editing code.
 - Always include the repo root (`--include="."`) so the entrypoint and `deno.json` ship; build excludes should come from `git ls-files --ignored --exclude-standard`, with per-repo exceptions to keep gitignored build outputs that must deploy (e.g., `static/dist/**`, `dist/**`, `out/**`, `static/bundles/**`, or `public/app.js*`).
 - Use the repo default branch as the production gate; let deployctl include the repo root and build a gitignore-based exclude list, skipping gitignored build artifacts that must ship (e.g., `public/app.js` in `uusd.ubq.fi`).
+
+## Deno Deploy Debugging Notes
+
+- If deployment succeeds but probe returns HTTP 000 or 404, check: project name ends with `-ubq-fi`, build_env uses `$VAR` syntax (not `${{ secrets.VAR }}`), runtime_env includes `STATIC_DIR=static`, include covers `static/**` (for index.html and dist), serve.ts has SPA fallback to serve index.html for non-file 404s.
+- Build outputs to `static/dist`, but index.html is in `static/`, so STATIC_DIR=static and include static/**.
+- For SPA apps, serve.ts must handle client-side routing by falling back to index.html on 404 for paths without extensions.
+- Linter enhancements: yamllint with GitHub Actions schema for validation; run `./scripts/lint-actions.sh` to check workflows.
