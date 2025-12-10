@@ -240,7 +240,7 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          project="$PROJECT"
+          project="${PROJECT:-}"
           if [[ "$project" != *-ubq-fi ]]; then
             echo "::error::Project name must end with '-ubq-fi' to match router mapping. Got: $project"
             exit 1
@@ -250,7 +250,7 @@ jobs:
             exit 1
           fi
 
-          preview="$PREVIEW_PROJECT"
+          preview="${PREVIEW_PROJECT:-}"
           if [ -z "$preview" ]; then
             base="${project%-ubq-fi}"
             # Clamp base to keep preview <=26 with prefix/suffix: p- + base + -ubq-fi
@@ -302,8 +302,8 @@ jobs:
           TARGET_PROJECT: ${{ steps.target.outputs.project }}
         run: |
           set -euo pipefail
-          project="$TARGET_PROJECT"
-          mode="$MODE"
+          project="${TARGET_PROJECT:-}"
+          mode="${MODE:-}"
           if [ -z "$project" ]; then
             echo "::error::Target project was not resolved"
             exit 1
@@ -478,6 +478,9 @@ jobs:
             print(url, end="")
           PY
           )
+          if [ -z "$URL" ]; then
+            URL="$fallback"
+          fi
           echo "url=$URL" >> "$GITHUB_OUTPUT"
 
       - name: Verify deployment
@@ -486,10 +489,13 @@ jobs:
         run: |
           set -euo pipefail
           url='${{ steps.deployed_url.outputs.url }}'
+          if [ -z "$url" ]; then
+            url="https://${{ steps.deploy.outputs.project }}.deno.dev"
+          fi
           codes_ok="200 301 302 308"
           status="warn"
           http_code="000"
-          for i in 1 2 3; do
+          for _ in 1 2 3; do
             http_code=$(curl -sS -o /dev/null -w "%{http_code}" "$url" || echo "000")
             if echo "$codes_ok" | grep -q "\b$http_code\b"; then
               status="ok"
