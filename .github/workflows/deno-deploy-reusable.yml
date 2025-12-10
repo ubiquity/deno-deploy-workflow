@@ -458,7 +458,33 @@ jobs:
             flags+=("--env-var=$line")
           done <<< "$RUNTIME_ENV"
 
-          deployctl deploy "${flags[@]}"
+          attempt=1
+          max_attempts=6
+          base_sleep=30
+          while true; do
+            set +e
+            output=$(deployctl deploy "${flags[@]}" 2>&1)
+            status=$?
+            set -e
+            if [ $status -eq 0 ]; then
+              echo "$output"
+              break
+            fi
+            if echo "$output" | grep -q "Too many deployments created per hour"; then
+              if [ $attempt -ge $max_attempts ]; then
+                echo "::error::Deno Deploy rate limit hit after ${attempt} attempts"
+                echo "$output"
+                exit 1
+              fi
+              sleep_for=$(( base_sleep << (attempt-1) ))
+              echo "::warning::Deno Deploy rate limit (attempt ${attempt}/${max_attempts}); sleeping ${sleep_for}s"
+              sleep "$sleep_for"
+              attempt=$(( attempt + 1 ))
+              continue
+            fi
+            echo "$output"
+            exit $status
+          done
 
           echo "project=$target" >> "$GITHUB_OUTPUT"
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
