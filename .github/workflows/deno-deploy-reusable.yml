@@ -460,7 +460,6 @@ jobs:
 
           attempt=1
           max_attempts=6
-          base_sleep=30
           while true; do
             set +e
             output=$(deployctl deploy "${flags[@]}" 2>&1)
@@ -476,9 +475,8 @@ jobs:
                 echo "$output"
                 exit 1
               fi
-              sleep_for=$(( base_sleep << (attempt-1) ))
-              echo "::warning::Deno Deploy rate limit (attempt ${attempt}/${max_attempts}); sleeping ${sleep_for}s"
-              sleep "$sleep_for"
+              echo "::warning::Deno Deploy rate limit (attempt ${attempt}/${max_attempts}); retrying shortly"
+              sleep 5
               attempt=$(( attempt + 1 ))
               continue
             fi
@@ -663,16 +661,11 @@ jobs:
               if [ "$skip" = true ]; then
                 continue
               fi
-              attempts=1
-              retry_sleep=0
               attempt_code="000"
               for ((i=1; i<=attempts; i++)); do
                 attempt_code=$(curl -sS -o /dev/null -w "%{http_code}" "$url" || echo "000")
                 if echo "$ok_codes" | grep -q "\b$attempt_code\b"; then
                   break
-                fi
-                if [ $i -lt $attempts ]; then
-                  sleep "$retry_sleep"
                 fi
               done
 
