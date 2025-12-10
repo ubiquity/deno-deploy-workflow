@@ -241,14 +241,27 @@ jobs:
         run: |
           set -euo pipefail
           project="$PROJECT"
-          preview="$PREVIEW_PROJECT"
-          if [ -z "$preview" ]; then
-            preview="${project}-preview"
+          if [[ "$project" != *-ubq-fi ]]; then
+            echo "::error::Project name must end with '-ubq-fi' to match router mapping. Got: $project"
+            exit 1
           fi
           if [ ${#project} -gt 26 ]; then
             echo "::error::Base project name '${project}' exceeds 26 characters (Deno Deploy's max project name character limit)"
             exit 1
           fi
+
+          preview="$PREVIEW_PROJECT"
+          if [ -z "$preview" ]; then
+            base="${project%-ubq-fi}"
+            # Clamp base to keep preview <=26 with prefix/suffix: p- + base + -ubq-fi
+            if [ ${#base} -gt 17 ]; then
+              # 12 chars + dash + 4-char hash = 17
+              hash=$(printf '%s' "$base" | sha1sum | cut -c1-4)
+              base="${base:0:12}-${hash}"
+            fi
+            preview="p-${base}-ubq-fi"
+          fi
+
           if [ ${#preview} -gt 26 ]; then
             echo "::error::Preview project name '${preview}' exceeds 26 characters (Deno Deploy's max project name character limit)"
             exit 1
