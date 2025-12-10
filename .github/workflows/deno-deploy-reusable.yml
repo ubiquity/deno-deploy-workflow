@@ -583,9 +583,10 @@ jobs:
           add_base "$ubq_base"
 
           ok_codes="200 301 302 304 308"
-          misses=()
+          per_base_misses=()
           summary=""
           seen_urls=()
+          declare -A path_any_ok=()
           record_seen() {
             local url="$1"
             for seen in "${seen_urls[@]:-}"; do
@@ -691,12 +692,20 @@ jobs:
               http_code=$(curl -sS -o /dev/null -w "%{http_code}" "$url" || echo "000")
               if echo "$ok_codes" | grep -q "\b$http_code\b"; then
                 summary+="- [ok] $url (HTTP $http_code)\n"
+                path_any_ok["$path"]=1
               else
                 summary+="- [miss] $url (HTTP $http_code)\n"
-                misses+=("$url")
+                per_base_misses+=("$url")
               fi
               record_seen "$url"
             done
+          done
+
+          hard_misses=()
+          for path in "${fetch_paths[@]:-}"; do
+            if [ -z "${path_any_ok[$path]:-}" ]; then
+              hard_misses+=("$path")
+            fi
           done
 
           {
@@ -705,8 +714,8 @@ jobs:
             printf "%b" "$summary"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          if [ ${#misses[@]} -gt 0 ] && [ "${DEBUG_FETCH_FAIL:-false}" = "true" ]; then
-            echo "::error::Debug fetch failures: ${misses[*]}"
+          if [ ${#hard_misses[@]} -gt 0 ] && [ "${DEBUG_FETCH_FAIL:-false}" = "true" ]; then
+            echo "::error::Debug fetch failures: ${hard_misses[*]}"
             exit 1
           fi
 
