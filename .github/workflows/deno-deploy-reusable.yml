@@ -586,6 +586,7 @@ jobs:
           summary=""
           seen_urls=()
           misses=()
+          ubq_retry=()
           record_seen() {
             local url="$1"
             for seen in "${seen_urls[@]:-}"; do
@@ -599,8 +600,8 @@ jobs:
           asset_paths=()
 
           if [ -n "$ubq_base" ]; then
-            echo "Waiting 60s for ubq.fi propagation before probes..."
-            sleep 60
+            echo "Waiting 30s for ubq.fi propagation before probes..."
+            sleep 30
           fi
 
           for base in "${bases[@]}"; do
@@ -716,10 +717,48 @@ jobs:
               else
                 summary+="- [miss] $url (HTTP $attempt_code)\n"
                 misses+=("$url")
+                if echo "$host" | grep -q '\.ubq\.fi$'; then
+                  ubq_retry+=("$url")
+                fi
               fi
               record_seen "$url"
             done
           done
+
+          if [ ${#ubq_retry[@]} -gt 0 ]; then
+            echo "Retrying ubq.fi URLs after additional wait..."
+            sleep 120
+            new_misses=()
+            for url in "${ubq_retry[@]}"; do
+              attempt_code="000"
+              for i in 1 2 3; do
+                attempt_code=$(curl -sS -o /dev/null -w "%{http_code}" "$url" || echo "000")
+                if echo "$ok_codes" | grep -q "\b$attempt_code\b"; then
+                  summary+="- [ok after wait] $url (HTTP $attempt_code)\n"
+                  break
+                fi
+                if [ $i -lt 3 ]; then
+                  sleep 5
+                fi
+              done
+              if ! echo "$ok_codes" | grep -q "\b$attempt_code\b"; then
+                summary+="- [miss after wait] $url (HTTP $attempt_code)\n"
+                new_misses+=("$url")
+              fi
+            done
+
+            filtered=()
+            for url in "${misses[@]}"; do
+              if printf '%s\n' "${ubq_retry[@]}" | grep -Fxq "$url"; then
+                if printf '%s\n' "${new_misses[@]}" | grep -Fxq "$url"; then
+                  filtered+=("$url")
+                fi
+              else
+                filtered+=("$url")
+              fi
+            done
+            misses=("${filtered[@]}")
+          fi
 
           {
             echo "### Debug fetch"
