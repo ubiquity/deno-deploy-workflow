@@ -583,10 +583,9 @@ jobs:
           add_base "$ubq_base"
 
           ok_codes="200 301 302 304 308"
-          per_base_misses=()
           summary=""
           seen_urls=()
-          declare -A path_any_ok=()
+          misses=()
           record_seen() {
             local url="$1"
             for seen in "${seen_urls[@]:-}"; do
@@ -689,23 +688,32 @@ jobs:
               if [ "$skip" = true ]; then
                 continue
               fi
-              http_code=$(curl -sS -o /dev/null -w "%{http_code}" "$url" || echo "000")
-              if echo "$ok_codes" | grep -q "\b$http_code\b"; then
+              host=$(echo "$base" | sed -n 's#^https://\([^/]*\).*#\1#p')
+              attempts=1
+              retry_sleep=0
+              if echo "$host" | grep -q '\.ubq\.fi$'; then
+                attempts=3
+                retry_sleep=5
+              fi
+              attempt_code="000"
+              for ((i=1; i<=attempts; i++)); do
+                attempt_code=$(curl -sS -o /dev/null -w "%{http_code}" "$url" || echo "000")
+                if echo "$ok_codes" | grep -q "\b$attempt_code\b"; then
+                  break
+                fi
+                if [ $i -lt $attempts ]; then
+                  sleep "$retry_sleep"
+                fi
+              done
+
+              if echo "$ok_codes" | grep -q "\b$attempt_code\b"; then
                 summary+="- [ok] $url (HTTP $http_code)\n"
-                path_any_ok["$path"]=1
               else
-                summary+="- [miss] $url (HTTP $http_code)\n"
-                per_base_misses+=("$url")
+                summary+="- [miss] $url (HTTP $attempt_code)\n"
+                misses+=("$url")
               fi
               record_seen "$url"
             done
-          done
-
-          hard_misses=()
-          for path in "${fetch_paths[@]:-}"; do
-            if [ -z "${path_any_ok[$path]:-}" ]; then
-              hard_misses+=("$path")
-            fi
           done
 
           {
@@ -714,8 +722,8 @@ jobs:
             printf "%b" "$summary"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          if [ ${#hard_misses[@]} -gt 0 ] && [ "${DEBUG_FETCH_FAIL:-false}" = "true" ]; then
-            echo "::error::Debug fetch failures: ${hard_misses[*]}"
+          if [ ${#misses[@]} -gt 0 ] && [ "${DEBUG_FETCH_FAIL:-false}" = "true" ]; then
+            echo "::error::Debug fetch failures: ${misses[*]}"
             exit 1
           fi
 
