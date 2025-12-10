@@ -583,6 +583,7 @@ jobs:
           add_base "$ubq_base"
 
           ok_codes="200 301 302 304 308"
+          curl_headers=("-H" "User-Agent: Mozilla/5.0 (GitHubActions Probe)")
           summary=""
           seen_urls=()
           misses=()
@@ -602,7 +603,7 @@ jobs:
             [ -z "$base" ] && continue
             root="${base%/}/"
             tmp_html="$(mktemp)"
-            http_code=$(curl -sS -L -w "%{http_code}" -o "$tmp_html" "$root" || echo "000")
+            http_code=$(curl -sS -L "${curl_headers[@]}" -w "%{http_code}" -o "$tmp_html" "$root" || echo "000")
             record_seen "$root"
             if echo "$ok_codes" | grep -q "\b$http_code\b"; then
               summary+="- [ok] $root (HTTP $http_code)\n"
@@ -697,7 +698,7 @@ jobs:
               fi
               attempt_code="000"
               for ((i=1; i<=attempts; i++)); do
-                attempt_code=$(curl -sS -o /dev/null -w "%{http_code}" "$url" || echo "000")
+              attempt_code=$(curl -sS "${curl_headers[@]}" -o /dev/null -w "%{http_code}" "$url" || echo "000")
                 if echo "$ok_codes" | grep -q "\b$attempt_code\b"; then
                   break
                 fi
