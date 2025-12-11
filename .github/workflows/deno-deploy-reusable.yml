@@ -198,8 +198,8 @@ jobs:
       NODE_VERSION: ${{ inputs.node_version }}
       BUN_VERSION: ${{ inputs.bun_version }}
       DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL || '' }}
-      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY || '' }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL || '' }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY || vars.SUPABASE_ANON_KEY || '' }}
       NPM_CONFIG_REGISTRY: https://registry.npmjs.org
 
     steps:
@@ -308,23 +308,17 @@ jobs:
           set -euo pipefail
           printf '%s\n' "$BUILD_ENV" | envsubst >> "$GITHUB_ENV"
 
-      - name: Validate Supabase env (optional)
+      - name: Validate Supabase env
         if: steps.preflight.outputs.deploy == 'yes'
         run: |
           set -euo pipefail
-          if [ -n "${SUPABASE_URL:-}" ] || [ -n "${SUPABASE_ANON_KEY:-}" ]; then
-            if [ -z "${SUPABASE_URL:-}" ]; then
-              echo "::error::SUPABASE_URL is empty"
-              exit 1
-            fi
-            if ! printf '%s' "$SUPABASE_URL" | grep -Eq '^https?://'; then
-              echo "::error::SUPABASE_URL must be an http(s) URL"
-              exit 1
-            fi
-            if [ -z "${SUPABASE_ANON_KEY:-}" ]; then
-              echo "::error::SUPABASE_ANON_KEY is empty"
-              exit 1
-            fi
+          if [ -z "${SUPABASE_URL:-}" ] || [ -z "${SUPABASE_ANON_KEY:-}" ]; then
+            echo "::error::Supabase env vars are required but missing (SUPABASE_URL/SUPABASE_ANON_KEY)"
+            exit 1
+          fi
+          if ! printf '%s' "$SUPABASE_URL" | grep -Eq '^https?://'; then
+            echo "::error::SUPABASE_URL must be an http(s) URL"
+            exit 1
           fi
 
       - name: Install dependencies
