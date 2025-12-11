@@ -559,6 +559,10 @@ jobs:
           cf_zone_id: ${{ env.CLOUDFLARE_ZONE_ID }}
           cf_api_token: ${{ env.CLOUDFLARE_API_TOKEN }}
 
+      - name: Wait for Cloudflare rule propagation
+        if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.CLOUDFLARE_ZONE_ID != '' && env.CLOUDFLARE_API_TOKEN != ''
+        run: sleep 10
+
       - name: Collect probe URLs
         if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true'
         id: probe_urls
