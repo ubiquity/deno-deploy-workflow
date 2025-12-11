@@ -21,6 +21,9 @@
   - Fallback: Zone-level IP access rules if lists/WAF edit insufficient; use CI_PROBE_TOKEN as org secret (visibility: all).
   - Propagation: 30s sleep works; poll /health with header every 250ms for precise timing.
   - Cleanup: DELETE /rules/{rule_id} fails with API token (use Global API Key for delete if needed).
+- GitHub Actions / deployctl tips:
+  - When exporting multiline env vars (e.g., debug fetch paths), use a heredoc into `$GITHUB_ENV` (`DEBUG_FETCH_PATHS<<EOF … EOF`); writing `DEBUG_FETCH_PATHS=$lines` fails with `Invalid format '<path>'`.
+  - deployctl occasionally returns `Unexpected token '<' ... is not valid JSON` during upload (Deno API returns HTML). Treat as transient: rerun after a short delay; issue seen on initial preview creation.
 
 ## Deno Deploy Debugging Notes
 
