@@ -529,6 +529,18 @@ jobs:
           fi
           echo "url=$URL" >> "$GITHUB_OUTPUT"
 
+      - name: Log Cloudflare secrets presence
+        if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true'
+        run: |
+          set -euo pipefail
+          acct="missing"
+          zone="missing"
+          token="missing"
+          [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ] && acct="present"
+          [ -n "${CLOUDFLARE_ZONE_ID:-}" ] && zone="present"
+          [ -n "${CLOUDFLARE_API_TOKEN:-}" ] && token="present"
+          echo "Cloudflare secrets - account_id: $acct, zone_id: $zone, api_token: $token"
+
       - name: Bypass Cloudflare for GitHub Actions (optional)
         if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.CLOUDFLARE_ZONE_ID != '' && env.CLOUDFLARE_API_TOKEN != ''
         uses: xiaotianxt/bypass-cloudflare-for-github-action@v2.0.1
