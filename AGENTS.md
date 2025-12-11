@@ -14,6 +14,7 @@
 - Process discipline: after changing a repo, wait for that repo’s deploy run to succeed before adding lessons here—only propagate guidance that has been validated by a successful deployment so later sub-projects inherit proven steps.
 - Per-project nuance: `lib/pay.ubq.fi` builds the frontend in `frontend/` and serves from `frontend/dist` via `serve.ts`; workflow should run `bun install && bun run build` inside `frontend`, include `frontend/dist/**`, and set runtime `STATIC_DIR=frontend/dist` with build env `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY` (no `static/**` path there).
 - Repo layout note: `lib/` contains working copies of the subdomain projects (health, onboard, pay, etc.); leave unrelated local changes there untouched unless explicitly working on that subproject.
+- Cloudflare WAF bypass: Uses WAF custom rule with skip action for requests with `x-ci-token` header matching `CI_PROBE_TOKEN` org secret; skips managed rules, rate limiting, and bot fight for CI probes; rule created/deleted per workflow run.
 
 ## Deno Deploy Debugging Notes
 
