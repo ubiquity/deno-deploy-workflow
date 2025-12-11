@@ -308,6 +308,25 @@ jobs:
           set -euo pipefail
           echo "$BUILD_ENV" >> "$GITHUB_ENV"
 
+      - name: Validate Supabase env (optional)
+        if: steps.preflight.outputs.deploy == 'yes'
+        run: |
+          set -euo pipefail
+          if [ -n "${SUPABASE_URL:-}" ] || [ -n "${SUPABASE_ANON_KEY:-}" ]; then
+            if [ -z "${SUPABASE_URL:-}" ]; then
+              echo "::error::SUPABASE_URL is empty"
+              exit 1
+            fi
+            if ! printf '%s' "$SUPABASE_URL" | grep -Eq '^https?://'; then
+              echo "::error::SUPABASE_URL must be an http(s) URL"
+              exit 1
+            fi
+            if [ -z "${SUPABASE_ANON_KEY:-}" ]; then
+              echo "::error::SUPABASE_ANON_KEY is empty"
+              exit 1
+            fi
+          fi
+
       - name: Install dependencies
         if: steps.preflight.outputs.deploy == 'yes' && env.INSTALL_COMMAND != ''
         run: |
