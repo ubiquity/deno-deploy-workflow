@@ -326,9 +326,9 @@ jobs:
           set -euo pipefail
           index_file="${ROOT_DIR}/${INDEX_HTML_PATH}"
           if [ -f "$index_file" ]; then
-            # Extract relative paths from href and src attributes
-            paths=$(grep -o 'href="[^"]*"' "$index_file" | sed 's/href="//; s/"$//' | grep -v '^http' | sed 's|^|/|' | sort -u)
-            paths="$paths"$'\n'$(grep -o 'src="[^"]*"' "$index_file" | sed 's/src="//; s/"$//' | grep -v '^http' | sed 's|^|/|' | sort -u)
+            # Extract paths from href and src attributes, normalize to start with /
+            paths=$(grep -o 'href="[^"]*"' "$index_file" | sed 's/href="//; s/"$//' | grep -v '^http' | sed 's|^[^/]|/&|' | sort -u)
+            paths="$paths"$'\n'$(grep -o 'src="[^"]*"' "$index_file" | sed 's/src="//; s/"$//' | grep -v '^http' | sed 's|^[^/]|/&|' | sort -u)
             # Add root path
             paths="/$paths"
             # Add extra paths
