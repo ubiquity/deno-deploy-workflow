@@ -1,6 +1,7 @@
 # Ubiquity Subdomain Deploy Notes
 
 - All subdomain apps share the same Supabase project; use the org-level GitHub secrets `SUPABASE_URL` and `SUPABASE_ANON_KEY` (already defined). Do **not** customize per-repo values.
+- When calling the reusable Deno Deploy workflow, use `secrets: inherit` (or explicitly forward Supabase secrets) so build-time env is populated; org-level vars mirror the secrets and are preferred when present.
 - Deno Deploy workflows must include `serve.ts` and `deno.json` in `deployctl --include` alongside `static/**` so the entrypoint and config ship with the bundle.
 - Prefer the inline Deno Deploy workflow pattern already rolled out (setup Deno 2.x, install Bun via the curl script, install deployctl, `bun run build`, then `deployctl deploy` with prod flag on the default branch).
 - If a build step needs Supabase env vars, feed them via `build_env`/`env` from the org secrets; runtime env is not required for static sites.
