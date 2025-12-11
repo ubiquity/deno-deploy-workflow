@@ -336,6 +336,58 @@ jobs:
           set -euo pipefail
           printf '%s\n' "$BUILD_COMMAND" | bash
 
+      - name: "Guard: unresolved env placeholders"
+        if: steps.preflight.outputs.deploy == 'yes'
+        run: |
+          set -euo pipefail
+          collect_keys() {
+            awk '
+              /^[A-Za-z_][A-Za-z0-9_]*=/ { sub(/=.*/, "", $0); print $0 }
+              /^[A-Za-z_][A-Za-z0-9_]*$/ { print $0 }
+            '
+          }
+
+          keys="$(
+            {
+              printf '%s\n' "$BUILD_ENV"
+              printf '%s\n' "$RUNTIME_ENV"
+              printf '%s\n' "$RUNTIME_ENV_KEYS"
+              printf '%s\n' "$REQUIRED_ENV"
+            } | collect_keys | sort -u
+          )"
+
+          # Fallback to Supabase keys if nothing parsed (should not happen)
+          if [ -z "$keys" ]; then
+            keys="SUPABASE_URL SUPABASE_ANON_KEY"
+          fi
+
+          search_terms=()
+          for k in $keys; do
+            search_terms+=("\$$k")
+            search_terms+=("\${$k}")
+          done
+
+          candidate_dirs=(static dist out public frontend/dist build)
+          matches=""
+
+          for term in "${search_terms[@]}"; do
+            for d in "${candidate_dirs[@]}"; do
+              dir="${ROOT_DIR}/${d}"
+              [ -d "$dir" ] || continue
+              found=$(rg --no-config --fixed-strings --no-heading --line-number "$term" "$dir" || true)
+              if [ -n "$found" ]; then
+                matches+=$'\n'"${d}:"
+                matches+=$'\n'"$found"
+              fi
+            done
+          done
+
+          if [ -n "$matches" ]; then
+            echo "::error::Detected unresolved env placeholders in built assets. This usually means one of the expected env vars was empty when building. Populate the missing values (see below) and rerun."
+            printf '%s\n' "$matches"
+            exit 1
+          fi
+
       - name: Resolve index.html path
         if: steps.preflight.outputs.deploy == 'yes'
         run: |
@@ -576,8 +628,7 @@ jobs:
           done <<< "$RUNTIME_ENV"
 
           attempt=1
-          base_sleep=30
-          max_sleep=3600
+          poll_sleep=60
           start_time=$(date +%s)
           # Leave a small buffer so verify/summary steps can complete before hitting the 6h Actions limit.
           max_seconds=$(( 6 * 60 * 60 - 300 ))
@@ -599,10 +650,7 @@ jobs:
                 echo "$output"
                 exit 1
               fi
-              sleep_for=$(( base_sleep << (attempt-1) ))
-              if [ $sleep_for -gt $max_sleep ]; then
-                sleep_for=$max_sleep
-              fi
+              sleep_for=$poll_sleep
               if [ $sleep_for -gt $remaining ]; then
                 sleep_for=$remaining
               fi

@@ -24,7 +24,9 @@
   - Cleanup: DELETE /rules/{rule_id} fails with API token (use Global API Key for delete if needed).
 - GitHub Actions / deployctl tips:
   - When exporting multiline env vars (e.g., debug fetch paths), use a heredoc into `$GITHUB_ENV` (`DEBUG_FETCH_PATHS<<EOF … EOF`); writing `DEBUG_FETCH_PATHS=$lines` fails with `Invalid format '<path>'`.
-  - deployctl occasionally returns `Unexpected token '<' ... is not valid JSON` during upload (Deno API returns HTML). Treat as transient: rerun after a short delay; issue seen on initial preview creation.
+  - deployctl can return `Unexpected token '<' ... is not valid JSON` when Deno Deploy rate limits and sends HTML. Treat as a throttle signal: let the 1-minute polling keep running or rerun later once the per-hour limit cools down (no workflow edits needed).
+  - Supabase build env regression: if the frontend throws `Invalid supabaseUrl: Must be a valid HTTP or HTTPS URL`, curl the deployed JS bundle and check `SUPABASE_URL`/`SUPABASE_ANON_KEY` values. If they literally read `$SUPABASE_URL`/`$SUPABASE_ANON_KEY`, the build env was injected with placeholders—rerun deploy ensuring org `vars.SUPABASE_URL`/`vars.SUPABASE_ANON_KEY` (or secrets) are present; the reusable workflow already exports them via `BUILD_ENV`, so a rerun fixes it once the vars are set.
+  - The reusable workflow now fails early if built assets still contain literal `$VAR`/`${VAR}` placeholders for any env we export (build/runtime/required). If it fires, set the missing env/vars and rerun.
 
 ## Deno Deploy Debugging Notes
 
