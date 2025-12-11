@@ -117,8 +117,18 @@ on:
         required: false
         type: boolean
         default: true
+      index_html_path:
+        description: Path to index.html for extracting static asset paths (relative to root)
+        required: false
+        type: string
+        default: "index.html"
+      extra_paths:
+        description: Optional newline-separated additional paths to test (e.g., API endpoints)
+        required: false
+        type: string
+        default: ""
       debug_fetch_paths:
-        description: Optional newline-separated URLs or paths (relative to deployed base URL) to GET after deploy for debugging
+        description: Optional newline-separated URLs or paths (relative to deployed base URL) to GET after deploy for debugging (overrides dynamic extraction)
         required: false
         type: string
         default: ""
@@ -179,6 +189,8 @@ jobs:
       INSTALL_COMMAND: ${{ inputs.install_command }}
       CREATE_PREVIEW: ${{ inputs.create_preview }}
       VERIFY_URL: ${{ inputs.verify_url }}
+      INDEX_HTML_PATH: ${{ inputs.index_html_path }}
+      EXTRA_PATHS: ${{ inputs.extra_paths }}
       DEBUG_FETCH_PATHS: ${{ inputs.debug_fetch_paths }}
       DEBUG_FETCH_FAIL: ${{ inputs.debug_fetch_fail }}
       DENO_VERSION: ${{ inputs.deno_version }}
@@ -307,6 +319,26 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s\n' "$BUILD_COMMAND" | bash
+
+      - name: Extract debug paths
+        if: steps.preflight.outputs.deploy == 'yes' && env.DEBUG_FETCH_PATHS == ''
+        run: |
+          set -euo pipefail
+          index_file="${ROOT_DIR}/${INDEX_HTML_PATH}"
+          if [ -f "$index_file" ]; then
+            # Extract relative paths from href and src attributes
+            paths=$(grep -o 'href="[^"]*"' "$index_file" | sed 's/href="//; s/"$//' | grep -v '^http' | sed 's|^|/|' | sort -u)
+            paths="$paths"$'\n'$(grep -o 'src="[^"]*"' "$index_file" | sed 's/src="//; s/"$//' | grep -v '^http' | sed 's|^|/|' | sort -u)
+            # Add root path
+            paths="/$paths"
+            # Add extra paths
+            if [ -n "$EXTRA_PATHS" ]; then
+              paths="$paths"$'\n'"$EXTRA_PATHS"
+            fi
+            # Deduplicate
+            paths=$(printf '%s\n' "$paths" | sort -u | sed '/^$/d')
+            echo "DEBUG_FETCH_PATHS=$paths" >> "$GITHUB_ENV"
+          fi
 
       - name: Ensure project exists and sync secrets
         if: steps.preflight.outputs.deploy == 'yes'
