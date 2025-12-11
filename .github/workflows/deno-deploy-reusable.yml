@@ -154,6 +154,8 @@ on:
         required: false
       CLOUDFLARE_API_TOKEN:
         required: false
+      CI_PROBE_TOKEN:
+        required: false
 
 permissions:
   contents: read
@@ -197,6 +199,7 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || '' }}
       CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID || '' }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || '' }}
+      CI_PROBE_TOKEN: ${{ secrets.CI_PROBE_TOKEN || '' }}
       NPM_CONFIG_REGISTRY: https://registry.npmjs.org
 
     steps:
@@ -542,27 +545,52 @@ jobs:
           echo "Cloudflare secrets - account_id: $acct, zone_id: $zone, api_token: $token"
 
       - name: Bypass Cloudflare WAF (optional)
-        if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.CLOUDFLARE_ZONE_ID != '' && env.CLOUDFLARE_API_TOKEN != ''
+        if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.CLOUDFLARE_ZONE_ID != '' && env.CLOUDFLARE_API_TOKEN != '' && env.CI_PROBE_TOKEN != ''
         run: |
           set -euo pipefail
-          # Get runner IP
-          ip=$(curl -s https://api64.ipify.org)
-          echo "Runner IP: $ip"
-
-          # Create access rule to whitelist the IP
-          response=$(curl --request POST \
-            --url "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/firewall/access_rules" \
+          # Create WAF custom rule to skip managed rules for requests with CI probe token
+          # Get the ruleset ID for http_request_firewall_custom phase
+          response=$(curl --request GET \
+            --url "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/rulesets/phases/http_request_firewall_custom/entrypoint" \
             --header 'Content-Type: application/json' \
-            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-            --data "{\"mode\":\"whitelist\",\"configuration\":{\"target\":\"ip\",\"value\":\"$ip\"},\"notes\":\"GitHub Actions bypass\"}")
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
 
-          echo "Create access rule response: $response"
-          rule_id=$(echo "$response" | jq -r '.result.id')
-          if [ "$rule_id" = "null" ] || [ -z "$rule_id" ]; then
-            echo "Failed to create access rule: $response"
+          ruleset_id=$(echo "$response" | jq -r '.result.id')
+          if [ "$ruleset_id" = "null" ] || [ -z "$ruleset_id" ]; then
+            echo "Failed to get ruleset ID: $response"
             exit 1
           fi
-          echo "Created access rule ID: $rule_id"
+          echo "Found ruleset ID: $ruleset_id"
+
+          # Create the rule
+          rule_payload=$(jq -n \
+            --arg token "$CI_PROBE_TOKEN" \
+            '{
+              description: "Skip WAF for CI probes",
+              expression: "http.request.headers[\"x-ci-token\"][eq] \"\($token)\"",
+              action: "skip",
+              action_parameters: {
+                phases: ["http_request_firewall_managed", "http_ratelimit", "http_request_sbfm"],
+                ruleset: "current"
+              },
+              position: {
+                index: 1
+              }
+            }')
+
+          response=$(curl --request POST \
+            --url "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/rulesets/$ruleset_id/rules" \
+            --header 'Content-Type: application/json' \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            --data "$rule_payload")
+
+          echo "Create WAF rule response: $response"
+          rule_id=$(echo "$response" | jq -r '.result.id')
+          if [ "$rule_id" = "null" ] || [ -z "$rule_id" ]; then
+            echo "Failed to create WAF rule: $response"
+            exit 1
+          fi
+          echo "Created WAF rule ID: $rule_id"
           echo "rule_id=$rule_id" >> "$GITHUB_ENV"
 
       - name: Wait for Cloudflare rule propagation
@@ -644,7 +672,11 @@ jobs:
             [ -z "$url" ] && continue
             http_code="000"
             for _ in 1 2 3; do
-              http_code=$(curl -sS -L -o /dev/null -w "%{http_code}" "$url" || echo "000")
+              if [[ "$url" == *ubq.fi* ]]; then
+                http_code=$(curl -sS -L -o /dev/null -w "%{http_code}" -H "x-ci-token: $CI_PROBE_TOKEN" "$url" || echo "000")
+              else
+                http_code=$(curl -sS -L -o /dev/null -w "%{http_code}" "$url" || echo "000")
+              fi
               if echo "$codes_ok" | grep -q "\b$http_code\b"; then
                 break
               fi
@@ -715,7 +747,11 @@ jobs:
             [ -z "$base" ] && continue
             root="${base%/}/"
             tmp_html="$(mktemp)"
-            http_code=$(curl -sS -L -w "%{http_code}" -o "$tmp_html" "$root" || echo "000")
+            if [[ "$root" == *ubq.fi* ]]; then
+              http_code=$(curl -sS -L -w "%{http_code}" -o "$tmp_html" -H "x-ci-token: $CI_PROBE_TOKEN" "$root" || echo "000")
+            else
+              http_code=$(curl -sS -L -w "%{http_code}" -o "$tmp_html" "$root" || echo "000")
+            fi
             record_seen "$root"
             if echo "$ok_codes" | grep -q "\b$http_code\b"; then
               summary+="- [ok] $root (HTTP $http_code)\n"
@@ -801,7 +837,11 @@ jobs:
               if [ "$skip" = true ]; then
                 continue
               fi
-              attempt_code=$(curl -sS -o /dev/null -w "%{http_code}" "$url" || echo "000")
+              if [[ "$url" == *ubq.fi* ]]; then
+                attempt_code=$(curl -sS -o /dev/null -w "%{http_code}" -H "x-ci-token: $CI_PROBE_TOKEN" "$url" || echo "000")
+              else
+                attempt_code=$(curl -sS -o /dev/null -w "%{http_code}" "$url" || echo "000")
+              fi
 
               if echo "$ok_codes" | grep -q "\b$attempt_code\b"; then
                 summary+="- [ok] $url (HTTP $attempt_code)\n"
@@ -878,7 +918,7 @@ jobs:
             exit 1
           fi
 
-      - name: Cleanup Cloudflare access rule
+      - name: Cleanup Cloudflare WAF rule
         if: always() && env.rule_id != ''
         run: |
           set -euo pipefail
@@ -887,8 +927,8 @@ jobs:
             echo "No rule ID to clean up"
             exit 0
           fi
-          echo "Deleting access rule $rule_id"
+          echo "Deleting WAF rule $rule_id"
           response=$(curl --request DELETE \
-            --url "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/firewall/access_rules/$rule_id" \
+            --url "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/rulesets/phases/http_request_firewall_custom/entrypoint/rules/$rule_id" \
             --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
           echo "Delete response: $response"
