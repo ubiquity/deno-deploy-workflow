@@ -541,27 +541,33 @@ jobs:
           [ -n "${CLOUDFLARE_API_TOKEN:-}" ] && token="present"
           echo "Cloudflare secrets - account_id: $acct, zone_id: $zone, api_token: $token"
 
-      - name: Debug Cloudflare Lists API
+      - name: Bypass Cloudflare WAF (optional)
         if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.CLOUDFLARE_ZONE_ID != '' && env.CLOUDFLARE_API_TOKEN != ''
         run: |
           set -euo pipefail
-          response=$(curl --request GET \
-            --url "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/rules/lists" \
-            --header 'Content-Type: application/json' \
-            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
-          echo "Lists API response: $response"
+          # Get runner IP
+          ip=$(curl -s https://api64.ipify.org)
+          echo "Runner IP: $ip"
 
-      - name: Bypass Cloudflare for GitHub Actions (optional)
-        if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.CLOUDFLARE_ZONE_ID != '' && env.CLOUDFLARE_API_TOKEN != ''
-        uses: xiaotianxt/bypass-cloudflare-for-github-action@v2.0.1
-        with:
-          cf_account_id: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
-          cf_zone_id: ${{ env.CLOUDFLARE_ZONE_ID }}
-          cf_api_token: ${{ env.CLOUDFLARE_API_TOKEN }}
+          # Create access rule to whitelist the IP
+          response=$(curl --request POST \
+            --url "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/firewall/access_rules" \
+            --header 'Content-Type: application/json' \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            --data "{\"mode\":\"whitelist\",\"configuration\":{\"target\":\"ip\",\"value\":\"$ip\"},\"notes\":\"GitHub Actions bypass\"}")
+
+          echo "Create access rule response: $response"
+          rule_id=$(echo "$response" | jq -r '.result.id')
+          if [ "$rule_id" = "null" ] || [ -z "$rule_id" ]; then
+            echo "Failed to create access rule: $response"
+            exit 1
+          fi
+          echo "Created access rule ID: $rule_id"
+          echo "rule_id=$rule_id" >> "$GITHUB_ENV"
 
       - name: Wait for Cloudflare rule propagation
         if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.CLOUDFLARE_ZONE_ID != '' && env.CLOUDFLARE_API_TOKEN != ''
-        run: sleep 10
+        run: sleep 30
 
       - name: Collect probe URLs
         if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true'
@@ -871,3 +877,18 @@ jobs:
             fi
             exit 1
           fi
+
+      - name: Cleanup Cloudflare access rule
+        if: always() && env.rule_id != ''
+        run: |
+          set -euo pipefail
+          rule_id="${rule_id:-}"
+          if [ -z "$rule_id" ]; then
+            echo "No rule ID to clean up"
+            exit 0
+          fi
+          echo "Deleting access rule $rule_id"
+          response=$(curl --request DELETE \
+            --url "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/firewall/access_rules/$rule_id" \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
+          echo "Delete response: $response"
