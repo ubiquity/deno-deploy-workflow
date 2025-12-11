@@ -148,6 +148,12 @@ on:
         required: false
       DENO_PREVIEW_PROJECT_SECRETS:
         required: false
+      CLOUDFLARE_ACCOUNT_ID:
+        required: false
+      CLOUDFLARE_ZONE_ID:
+        required: false
+      CLOUDFLARE_API_TOKEN:
+        required: false
 
 permissions:
   contents: read
@@ -188,6 +194,9 @@ jobs:
       DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
       SUPABASE_URL: ${{ secrets.SUPABASE_URL || '' }}
       SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY || '' }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || '' }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID || '' }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || '' }}
       NPM_CONFIG_REGISTRY: https://registry.npmjs.org
 
     steps:
@@ -520,40 +529,139 @@ jobs:
           fi
           echo "url=$URL" >> "$GITHUB_OUTPUT"
 
+      - name: Bypass Cloudflare for GitHub Actions (optional)
+        if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.CLOUDFLARE_ZONE_ID != '' && env.CLOUDFLARE_API_TOKEN != ''
+        uses: xiaotianxt/bypass-cloudflare-for-github-action@v2.0.1
+        with:
+          cf_account_id: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+          cf_zone_id: ${{ env.CLOUDFLARE_ZONE_ID }}
+          cf_api_token: ${{ env.CLOUDFLARE_API_TOKEN }}
+
+      - name: Collect probe URLs
+        if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true'
+        id: probe_urls
+        env:
+          DEPLOYED_URL: ${{ steps.deployed_url.outputs.url }}
+          TARGET_PROJECT: ${{ steps.deploy.outputs.project }}
+        run: |
+          set -euo pipefail
+          primary="${DEPLOYED_URL:-}"
+          project="${TARGET_PROJECT:-}"
+          if [ -z "$project" ]; then
+            echo "::error::Target project missing; cannot build probe URLs"
+            exit 1
+          fi
+
+          deno="https://${project}.deno.dev"
+          router=""
+
+          if [[ "$project" =~ ^p-(.+)-ubq-fi$ ]]; then
+            base="${BASH_REMATCH[1]}"
+            router="https://preview-${base}.ubq.fi"
+          elif [[ "$project" =~ ^(.+)-ubq-fi$ ]]; then
+            base="${BASH_REMATCH[1]}"
+            router="https://${base}.ubq.fi"
+          fi
+
+          urls=()
+          add_url() {
+            local u="$1"
+            [ -z "$u" ] && return
+            for existing in "${urls[@]:-}"; do
+              if [ "$existing" = "$u" ]; then
+                return
+              fi
+            done
+            urls+=("$u")
+          }
+
+          add_url "$primary"
+          add_url "$deno"
+          add_url "$router"
+
+          {
+            echo "deno_base=$deno"
+            echo "router_base=$router"
+            echo "urls<<'EOF'"
+            printf '%s\n' "${urls[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Verify deployment
         if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true'
         id: verify
         continue-on-error: true
+        env:
+          PROBE_URLS: ${{ steps.probe_urls.outputs.urls }}
         run: |
           set -euo pipefail
-          url='${{ steps.deployed_url.outputs.url }}'
-          if [ -z "$url" ]; then
-            url="https://${{ steps.deploy.outputs.project }}.deno.dev"
+          probes="${PROBE_URLS:-}"
+          if [ -z "$probes" ]; then
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+            echo "::error::No probe URLs collected for verification"
+            exit 0
           fi
-          codes_ok="200"
-          status="fail"
-          http_code="000"
-          for _ in 1 2 3; do
-            http_code=$(curl -sS -L -o /dev/null -w "%{http_code}" "$url" || echo "000")
+
+          codes_ok="200 301 302 304 308"
+          summary=""
+          failures=()
+          status="ok"
+
+          while IFS= read -r raw; do
+            url=$(echo "$raw" | tr -d '\r' | xargs)
+            [ -z "$url" ] && continue
+            http_code="000"
+            for _ in 1 2 3; do
+              http_code=$(curl -sS -L -o /dev/null -w "%{http_code}" "$url" || echo "000")
+              if echo "$codes_ok" | grep -q "\b$http_code\b"; then
+                break
+              fi
+              sleep 3
+            done
+
             if echo "$codes_ok" | grep -q "\b$http_code\b"; then
-              status="ok"
-              break
+              summary+="- [ok] $url (HTTP $http_code)\n"
+            else
+              summary+="- [miss] $url (HTTP $http_code)\n"
+              failures+=("$url (HTTP $http_code)")
+              status="fail"
             fi
-            sleep 5
-          done
-          echo "http_code=$http_code" >> "$GITHUB_OUTPUT"
+          done <<< "$probes"
+
+          if [ -z "$summary" ]; then
+            status="fail"
+            msg="No probe URLs were processed"
+            failures+=("$msg")
+            summary+="- [miss] $msg\n"
+          fi
+
+          {
+            echo "### HTTP probe"
+            echo ""
+            printf "%b" "$summary"
+          } >> "$GITHUB_STEP_SUMMARY"
+
           echo "status=$status" >> "$GITHUB_OUTPUT"
-          if [ "$status" != "ok" ]; then
-            echo "::error::Deployment probe returned HTTP $http_code at $url"
+          if [ ${#failures[@]} -gt 0 ]; then
+            {
+              echo "failures<<'EOF'"
+              printf '%s\n' "${failures[@]}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
           fi
 
       - name: Debug fetch paths and assets
         if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true'
+        env:
+          DENO_BASE: ${{ steps.probe_urls.outputs.deno_base }}
+          ROUTER_BASE: ${{ steps.probe_urls.outputs.router_base }}
         run: |
           set -euo pipefail
-          project='${{ steps.deploy.outputs.project }}'
-          deno_base="https://${project}.deno.dev"
-          bases=("$deno_base")
+          deno_base="${DENO_BASE:-}"
+          router_base="${ROUTER_BASE:-}"
+          bases=()
+          [ -n "$deno_base" ] && bases+=("$deno_base")
+          [ -n "$router_base" ] && bases+=("$router_base")
 
           ok_codes="200 301 302 304 308"
           summary=""
@@ -690,18 +798,35 @@ jobs:
           mode='${{ steps.deploy.outputs.mode }}'
           project='${{ steps.deploy.outputs.project }}'
           url="${{ steps.deployed_url.outputs.url || '' }}"
-          http="${{ steps.verify.outputs.http_code || '' }}"
-          status="${{ steps.verify.outputs.status || '' }}"
+          probes='${{ steps.probe_urls.outputs.urls || '' }}'
+          probe_status='${{ steps.verify.outputs.status || '' }}'
+          failures='${{ steps.verify.outputs.failures || '' }}'
           {
             echo "### Deno Deploy"
             echo ""
             echo "- Mode: ${mode:-unknown}"
             echo "- Project: ${project}"
             if [ -n "$url" ]; then
-              echo "- URL: ${url}"
+              echo "- Primary URL: ${url}"
             fi
-            if [ -n "$http" ]; then
-              echo "- HTTP: ${http} (${status})"
+            if [ -n "$probe_status" ]; then
+              echo "- Probe status: ${probe_status}"
+            fi
+            if [ -n "$probes" ]; then
+              echo "- Probe URLs:"
+              while IFS= read -r line; do
+                line=$(echo "$line" | tr -d '\r' | xargs)
+                [ -z "$line" ] && continue
+                echo "  - $line"
+              done <<< "$probes"
+            fi
+            if [ -n "$failures" ]; then
+              echo "- Probe failures:"
+              while IFS= read -r line; do
+                line=$(echo "$line" | tr -d '\r' | xargs)
+                [ -z "$line" ] && continue
+                echo "  - $line"
+              done <<< "$failures"
             fi
             echo "- Ref: ${GITHUB_REF##*/}"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -710,9 +835,13 @@ jobs:
         if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true'
         run: |
           status='${{ steps.verify.outputs.status || '' }}'
-          http='${{ steps.verify.outputs.http_code || '' }}'
-          url='${{ steps.deployed_url.outputs.url || '' }}'
           if [ "$status" != "ok" ]; then
-            echo "::error::Deployment probe failed with HTTP ${http:-unknown} at ${url:-<missing url>}"
+            failures='${{ steps.verify.outputs.failures || '' }}'
+            if [ -n "$failures" ]; then
+              msg="${failures//$'\n'/, }"
+              echo "::error::Deployment probe failed: ${msg}"
+            else
+              echo "::error::Deployment probe failed (see HTTP probe section)"
+            fi
             exit 1
           fi

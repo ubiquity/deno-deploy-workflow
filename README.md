@@ -12,7 +12,7 @@ This repository provides a standardized, reusable Deno Deploy workflow at `.gith
 - Optional project existence check plus project-secret sync via the Deno Deploy API (can read mappings from secrets to avoid code changes).
 - Gitignore-based excludes with custom includes for build outputs.
 - Runtime env var forwarding (preferred over env_var_keys for simplicity).
-- Post-deploy URL verification and HTTP probing.
+- Post-deploy URL verification and HTTP probing (deno.dev + ubq.fi router, with optional Cloudflare bypass when secrets are present).
 - Preflight checks for required secrets (skips deploy if missing).
 
 ## How to use (standardized template)
@@ -48,6 +48,16 @@ Notes:
 - Customize `include` for build output dirs (e.g., `static/dist/**`).
 - Set `bun_version`/`node_version` and commands for repos with builds.
 - Secrets managed entirely in GitHub UI—update secret, next deploy syncs to Deno.
+
+## Cloudflare WAF / ubq.fi probe
+
+The workflow probes both the Deno Deploy domain and the routed `ubq.fi` hostname. To keep Cloudflare from blocking GitHub runners, add these optional secrets to repos that use the reusable workflow:
+
+- `CLOUDFLARE_ACCOUNT_ID`
+- `CLOUDFLARE_ZONE_ID`
+- `CLOUDFLARE_API_TOKEN` (token that can manage an IP list + WAF rule for the zone)
+
+When present, the workflow runs `xiaotianxt/bypass-cloudflare-for-github-action@v2.0.1` before HTTP probes.
 
 ## Migrated Subdomains
 
