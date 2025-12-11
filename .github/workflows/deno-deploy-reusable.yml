@@ -167,6 +167,7 @@ jobs:
   deploy:
     name: Deno Deploy
     runs-on: ubuntu-22.04
+    timeout-minutes: 360
     concurrency:
       group: deno-deploy-${{ inputs.project }}-${{ github.ref }}
       cancel-in-progress: true
@@ -575,8 +576,11 @@ jobs:
           done <<< "$RUNTIME_ENV"
 
           attempt=1
-          max_attempts=6
           base_sleep=30
+          max_sleep=3600
+          start_time=$(date +%s)
+          # Leave a small buffer so verify/summary steps can complete before hitting the 6h Actions limit.
+          max_seconds=$(( 6 * 60 * 60 - 300 ))
           while true; do
             set +e
             output=$(deployctl deploy "${flags[@]}" 2>&1)
@@ -587,13 +591,22 @@ jobs:
               break
             fi
             if echo "$output" | grep -q "Too many deployments created per hour"; then
-              if [ $attempt -ge $max_attempts ]; then
-                echo "::error::Deno Deploy rate limit hit after ${attempt} attempts"
+              now=$(date +%s)
+              elapsed=$(( now - start_time ))
+              remaining=$(( max_seconds - elapsed ))
+              if [ $remaining -le 0 ]; then
+                echo "::error::Deno Deploy rate limit persisted for ~${elapsed}s; exhausted retry window (6h budget)"
                 echo "$output"
                 exit 1
               fi
               sleep_for=$(( base_sleep << (attempt-1) ))
-              echo "::warning::Deno Deploy rate limit (attempt ${attempt}/${max_attempts}); sleeping ${sleep_for}s"
+              if [ $sleep_for -gt $max_sleep ]; then
+                sleep_for=$max_sleep
+              fi
+              if [ $sleep_for -gt $remaining ]; then
+                sleep_for=$remaining
+              fi
+              echo "::warning::Deno Deploy rate limit (attempt ${attempt}); sleeping ${sleep_for}s (elapsed ${elapsed}s, remaining ${remaining}s)"
               sleep "$sleep_for"
               attempt=$(( attempt + 1 ))
               continue
