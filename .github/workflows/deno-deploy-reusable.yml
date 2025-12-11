@@ -644,7 +644,7 @@ jobs:
           echo "status=$status" >> "$GITHUB_OUTPUT"
           if [ ${#failures[@]} -gt 0 ]; then
             {
-              echo "failures<<'EOF'"
+              echo "failures<<EOF"
               printf '%s\n' "${failures[@]}"
               echo "EOF"
             } >> "$GITHUB_OUTPUT"
