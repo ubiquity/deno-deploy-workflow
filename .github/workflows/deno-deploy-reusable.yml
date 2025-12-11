@@ -198,8 +198,10 @@ jobs:
       NODE_VERSION: ${{ inputs.node_version }}
       BUN_VERSION: ${{ inputs.bun_version }}
       DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL || '' }}
-      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY || vars.SUPABASE_ANON_KEY || '' }}
+      # Prefer org/global vars when present so shared values stay consistent across repos,
+      # while still allowing repo-specific secrets to override.
+      SUPABASE_URL: ${{ vars.SUPABASE_URL || secrets.SUPABASE_URL || '' }}
+      SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY || secrets.SUPABASE_ANON_KEY || '' }}
       NPM_CONFIG_REGISTRY: https://registry.npmjs.org
 
     steps:
