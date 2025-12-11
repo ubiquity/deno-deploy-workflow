@@ -582,7 +582,7 @@ jobs:
           {
             echo "deno_base=$deno"
             echo "router_base=$router"
-            echo "urls<<'EOF'"
+            echo "urls<<EOF"
             printf '%s\n' "${urls[@]}"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
