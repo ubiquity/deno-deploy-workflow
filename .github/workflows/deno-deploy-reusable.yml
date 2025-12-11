@@ -306,7 +306,7 @@ jobs:
         if: steps.preflight.outputs.deploy == 'yes' && env.BUILD_ENV != ''
         run: |
           set -euo pipefail
-          echo "$BUILD_ENV" >> "$GITHUB_ENV"
+          printf '%s\n' "$BUILD_ENV" | envsubst >> "$GITHUB_ENV"
 
       - name: Validate Supabase env (optional)
         if: steps.preflight.outputs.deploy == 'yes'
