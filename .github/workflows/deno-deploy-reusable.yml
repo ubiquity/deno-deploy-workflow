@@ -121,7 +121,7 @@ on:
         description: Path to index.html for extracting static asset paths (relative to root)
         required: false
         type: string
-        default: "index.html"
+        default: ""
       extra_paths:
         description: Optional newline-separated additional paths to test (e.g., API endpoints)
         required: false
@@ -191,7 +191,7 @@ jobs:
       VERIFY_URL: ${{ inputs.verify_url }}
       INDEX_HTML_PATH: ${{ inputs.index_html_path }}
       EXTRA_PATHS: ${{ inputs.extra_paths }}
-      DEBUG_FETCH_PATHS: ${{ inputs.debug_fetch_paths }}
+      DEBUG_FETCH_PATHS_INPUT: ${{ inputs.debug_fetch_paths }}
       DEBUG_FETCH_FAIL: ${{ inputs.debug_fetch_fail }}
       DENO_VERSION: ${{ inputs.deno_version }}
       DEPLOYCTL_VERSION: ${{ inputs.deployctl_version }}
@@ -320,25 +320,94 @@ jobs:
           set -euo pipefail
           printf '%s\n' "$BUILD_COMMAND" | bash
 
-      - name: Extract debug paths
-        if: steps.preflight.outputs.deploy == 'yes' && env.DEBUG_FETCH_PATHS == ''
+      - name: Resolve index.html path
+        if: steps.preflight.outputs.deploy == 'yes'
         run: |
           set -euo pipefail
-          index_file="${ROOT_DIR}/${INDEX_HTML_PATH}"
-          if [ -f "$index_file" ]; then
-            # Extract paths from href and src attributes, normalize to start with /
-            paths=$(grep -o 'href="[^"]*"' "$index_file" | sed 's/href="//; s/"$//' | grep -v '^http' | sed 's|^[^/]|/&|' | sort -u)
-            paths="$paths"$'\n'$(grep -o 'src="[^"]*"' "$index_file" | sed 's/src="//; s/"$//' | grep -v '^http' | sed 's|^[^/]|/&|' | sort -u)
-            # Add root path
-            paths="/$paths"
-            # Add extra paths
-            if [ -n "$EXTRA_PATHS" ]; then
-              paths="$paths"$'\n'"$EXTRA_PATHS"
-            fi
-            # Deduplicate
-            paths=$(printf '%s\n' "$paths" | sort -u | sed '/^$/d')
-            echo "DEBUG_FETCH_PATHS=$paths" >> "$GITHUB_ENV"
+          requested="${INDEX_HTML_PATH:-}"
+          index_file=""
+
+          # Prefer explicit input when it exists
+          if [ -n "$requested" ] && [ -f "${ROOT_DIR}/${requested}" ]; then
+            index_file="${ROOT_DIR}/${requested}"
+          elif [ -n "$requested" ]; then
+            echo "::warning::Requested index_html_path '${requested}' not found under ${ROOT_DIR}"
           fi
+
+          # Autodiscover common build outputs if not already resolved
+          if [ -z "$index_file" ]; then
+            for rel in \
+              "static/index.html" \
+              "public/index.html" \
+              "frontend/dist/index.html" \
+              "dist/index.html" \
+              "out/index.html" \
+              "src/client/dashboard/index.html" \
+              "src/index.html" \
+              "index.html"
+            do
+              if [ -f "${ROOT_DIR}/${rel}" ]; then
+                index_file="${ROOT_DIR}/${rel}"
+                break
+              fi
+            done
+          fi
+
+          # Final fallback: generic search, excluding heavy dirs
+          if [ -z "$index_file" ]; then
+            index_file=$(find "${ROOT_DIR}" \
+              -maxdepth 5 \
+              \( -path "*/node_modules/*" -o -path "*/.git/*" -o -path "*/.next/*" -o -path "*/.turbo/*" -o -path "*/.vercel/*" \) -prune \
+              -o -name index.html -print | head -n 1 || true)
+          fi
+
+          if [ -n "$index_file" ]; then
+            echo "INDEX_HTML_RESOLVED=${index_file}" >> "$GITHUB_ENV"
+            echo "Using index.html at ${index_file}"
+          else
+            echo "INDEX_HTML_RESOLVED=" >> "$GITHUB_ENV"
+            echo "::warning::No index.html found; debug fetch will only use extra/manual paths"
+          fi
+
+      - name: Build debug fetch paths
+        if: steps.preflight.outputs.deploy == 'yes'
+        run: |
+          set -euo pipefail
+          manual_paths="${DEBUG_FETCH_PATHS_INPUT:-}"
+          index_file="${INDEX_HTML_RESOLVED:-}"
+          paths="/"
+
+          if [ -n "$index_file" ] && [ -f "$index_file" ]; then
+            # Extract paths from href and src attributes (supports single and double quotes)
+            extracted=$(grep -oE "href=([\"'])([^\"']*)\\1" "$index_file" | sed -E "s/href=([\"'])([^\"']*)\\1/\\2/" | grep -v '^http' | sed 's|^[^/]|/&|')
+            extracted="$extracted"$'\n'$(grep -oE "src=([\"'])([^\"']*)\\1" "$index_file" | sed -E "s/src=([\"'])([^\"']*)\\1/\\2/" | grep -v '^http' | sed 's|^[^/]|/&|')
+            paths="$paths"$'\n'"$extracted"
+          elif [ -n "$index_file" ]; then
+            echo "::warning::Index HTML not found at ${index_file}; debug fetch will use extras/manual paths only"
+          fi
+
+          if [ -n "$EXTRA_PATHS" ]; then
+            paths="$paths"$'\n'"$EXTRA_PATHS"
+          fi
+
+          if [ -n "$manual_paths" ]; then
+            paths="$paths"$'\n'"$manual_paths"
+          fi
+
+          paths=$(printf '%s\n' "$paths" | tr -d '\r' | while IFS= read -r p; do
+            [ -z "$p" ] && continue
+            case "$p" in
+              http://*|https://*|//*) printf '%s\n' "$p" ;;
+              /*) printf '%s\n' "$p" ;;
+              *) printf '/%s\n' "$p" ;;
+            esac
+          done | sort -u | sed '/^$/d')
+
+          {
+            echo "DEBUG_FETCH_PATHS<<EOF"
+            echo "$paths"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
 
       - name: Ensure project exists and sync secrets
         if: steps.preflight.outputs.deploy == 'yes'

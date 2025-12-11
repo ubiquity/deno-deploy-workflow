@@ -12,7 +12,7 @@ This repository provides a standardized, reusable Deno Deploy workflow at `.gith
 - Optional project existence check plus project-secret sync via the Deno Deploy API (can read mappings from secrets to avoid code changes).
 - Gitignore-based excludes with custom includes for build outputs.
 - Runtime env var forwarding (preferred over env_var_keys for simplicity).
-- Post-deploy URL verification and HTTP probing.
+- Post-deploy URL verification and HTTP probing, auto-extracting asset paths from your built `index.html` so hashed bundles are probed without manual lists (index file is auto-discovered; override with `index_html_path` only if needed).
 - Preflight checks for required secrets (skips deploy if missing).
 
 ## How to use (standardized template)
