@@ -15,6 +15,12 @@
 - Per-project nuance: `lib/pay.ubq.fi` builds the frontend in `frontend/` and serves from `frontend/dist` via `serve.ts`; workflow should run `bun install && bun run build` inside `frontend`, include `frontend/dist/**`, and set runtime `STATIC_DIR=frontend/dist` with build env `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY` (no `static/**` path there).
 - Repo layout note: `lib/` contains working copies of the subdomain projects (health, onboard, pay, etc.); leave unrelated local changes there untouched unless explicitly working on that subproject.
 - Cloudflare WAF bypass: Uses WAF custom rule with skip action for requests with `x-ci-token` header matching `CI_PROBE_TOKEN` org secret; skips managed rules, rate limiting, and bot fight for CI probes; rule created/deleted per workflow run.
+  - Header-based custom rule (x-ci-token) skips managed rules/rate limiting/bot fight via /rulesets/phases/http_request_firewall_custom/entrypoint API.
+  - Requires token with Zone:Read + Zone WAF:Read/Edit; "all zones" may not grant Read—scope to specific account/zone for security.
+  - Local tests pass (200 after ~30s propagation), but Actions fail on ruleset fetch (403/unauthorized) if token lacks Read.
+  - Fallback: Zone-level IP access rules if lists/WAF edit insufficient; use CI_PROBE_TOKEN as org secret (visibility: all).
+  - Propagation: 30s sleep works; poll /health with header every 250ms for precise timing.
+  - Cleanup: DELETE /rules/{rule_id} fails with API token (use Global API Key for delete if needed).
 
 ## Deno Deploy Debugging Notes
 
