@@ -558,6 +558,7 @@ jobs:
           ruleset_id=$(echo "$response" | jq -r '.result.id')
           if [ "$ruleset_id" = "null" ] || [ -z "$ruleset_id" ]; then
             echo "Failed to get ruleset ID: $response"
+            echo "Response: $response"
             exit 1
           fi
           echo "Found ruleset ID: $ruleset_id"
