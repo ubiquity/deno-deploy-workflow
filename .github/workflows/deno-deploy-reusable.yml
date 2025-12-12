@@ -86,6 +86,18 @@ on:
         required: false
         type: string
         default: ""
+      forward_all_secrets:
+        description: Forward all available GitHub secrets as runtime env vars (dangerous; opt-in)
+        required: false
+        type: boolean
+        default: false
+      forward_all_secrets_exclude:
+        description: Newline-separated secret names to exclude when forward_all_secrets is true
+        required: false
+        type: string
+        default: |
+          DENO_DEPLOY_TOKEN
+          GITHUB_TOKEN
       ensure_project:
         description: Ensure the target project exists via Deno Deploy API before deploying
         required: false
@@ -159,6 +171,8 @@ on:
         required: false
       SUPABASE_ANON_KEY:
         required: false
+      SUPABASE_SERVICE_ROLE_KEY:
+        required: false
       DENO_PROJECT_SECRETS:
         required: false
       DENO_PREVIEW_PROJECT_SECRETS:
@@ -187,6 +201,8 @@ jobs:
       RUNTIME_ENV_KEYS: ${{ inputs.env_var_keys }}
       RUNTIME_ENV: ${{ inputs.runtime_env }}
       BUILD_ENV: ${{ inputs.build_env }}
+      FORWARD_ALL_SECRETS: ${{ inputs.forward_all_secrets }}
+      FORWARD_ALL_SECRETS_EXCLUDE: ${{ inputs.forward_all_secrets_exclude }}
       ENSURE_PROJECT: ${{ inputs.ensure_project }}
       PROJECT_SECRETS: ${{ inputs.project_secrets != '' && inputs.project_secrets || secrets.DENO_PROJECT_SECRETS || '' }}
       PREVIEW_PROJECT_SECRETS: ${{ inputs.preview_project_secrets != '' && inputs.preview_project_secrets || secrets.DENO_PREVIEW_PROJECT_SECRETS || '' }}
@@ -209,6 +225,7 @@ jobs:
       # while still allowing repo-specific secrets to override.
       SUPABASE_URL: ${{ vars.SUPABASE_URL || secrets.SUPABASE_URL || '' }}
       SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY || secrets.SUPABASE_ANON_KEY || '' }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ vars.SUPABASE_SERVICE_ROLE_KEY || secrets.SUPABASE_SERVICE_ROLE_KEY || '' }}
       NPM_CONFIG_REGISTRY: https://registry.npmjs.org
 
     steps:
@@ -502,6 +519,62 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_ENV"
 
+      - name: Forward all GitHub secrets (runtime)
+        if: steps.preflight.outputs.deploy == 'yes' && env.FORWARD_ALL_SECRETS == 'true'
+        env:
+          ALL_SECRETS_JSON: ${{ toJson(secrets) }}
+        run: |
+          set -euo pipefail
+
+          tmp_out="$(mktemp)"
+          python - <<'PY' > "$tmp_out"
+          import json, os, re, sys
+
+          raw = os.environ.get("ALL_SECRETS_JSON", "") or "{}"
+          try:
+              data = json.loads(raw)
+          except Exception:
+              data = {}
+
+          exclude = {
+              k.strip()
+              for k in (os.environ.get("FORWARD_ALL_SECRETS_EXCLUDE", "") or "").splitlines()
+              if k.strip()
+          }
+          valid = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+          lines = []
+          for k, v in data.items():
+              if k in exclude:
+                  continue
+              if not valid.match(k):
+                  continue
+              if v is None:
+                  continue
+              v = str(v)
+              if not v:
+                  continue
+              lines.append(f"{k}={v}")
+
+          sys.stdout.write("\n".join(lines))
+          PY
+
+          extra_runtime="$(cat "$tmp_out")"
+          rm -f "$tmp_out"
+          [ -z "$extra_runtime" ] && exit 0
+
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            echo "::add-mask::${line#*=}"
+          done <<< "$extra_runtime"
+
+          combined="$(printf '%s\n' "$RUNTIME_ENV" "$extra_runtime" | tr -d '\r' | sed '/^$/d')"
+          {
+            echo "RUNTIME_ENV<<EOF"
+            echo "$combined"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
       - name: Ensure project exists and sync secrets
         if: steps.preflight.outputs.deploy == 'yes'
         env:
@@ -557,6 +630,8 @@ jobs:
           rm -f "$tmp_resp"
 
           if [ -n "$secrets_block" ]; then
+            echo "::warning::project_secrets persistence via dash.deno.com API is no longer supported; forwarding these as runtime env for this deploy only."
+            extra_runtime=""
             while IFS= read -r line; do
               line=$(echo "$line" | tr -d '\r' | xargs)
               [ -z "$line" ] && continue
@@ -576,20 +651,17 @@ jobs:
                 continue
               fi
               echo "::add-mask::$val"
-              tmp_secret="$(mktemp)"
-              code=$(curl -sS -o "$tmp_secret" -w "%{http_code}" \
-                -X POST "$api_base/$project/secrets" \
-                -H "Authorization: Bearer $DENO_DEPLOY_TOKEN" \
-                -H "Content-Type: application/json" \
-                -d "{\"name\":\"$secret_name\",\"value\":\"$val\"}" || echo "000")
-              if [ "$code" != "200" ]; then
-                echo "::error::Failed to set secret $secret_name (HTTP $code)"
-                cat "$tmp_secret" || true
-                rm -f "$tmp_secret"
-                exit 1
-              fi
-              rm -f "$tmp_secret"
+              extra_runtime+=$'\n'"${secret_name}=${val}"
             done <<< "$secrets_block"
+
+            if [ -n "$extra_runtime" ]; then
+              combined="$(printf '%s\n' "$RUNTIME_ENV" "$extra_runtime" | tr -d '\r' | sed '/^$/d')"
+              {
+                echo "RUNTIME_ENV<<EOF"
+                echo "$combined"
+                echo "EOF"
+              } >> "$GITHUB_ENV"
+            fi
           fi
 
       - name: Deploy to Deno Deploy

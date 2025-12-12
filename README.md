@@ -9,7 +9,7 @@ This repository provides a standardized, reusable Deno Deploy workflow at `.gith
 - Configurable install/build commands (multi-line supported).
 - Branch-aware deployments: production on specified branch (default: `development`), preview on others.
 - Automatic preview project creation if missing.
-- Optional project existence check plus project-secret sync via the Deno Deploy API (can read mappings from secrets to avoid code changes).
+- Optional project existence check. `project_secrets` are forwarded as runtime env for the deploy (Deno Deploy secrets API is no longer supported).
 - Gitignore-based excludes with custom includes for build outputs.
 - Runtime env var forwarding (preferred over env_var_keys for simplicity).
 - Post-deploy URL verification and HTTP probing, auto-extracting asset paths from your built `index.html` so hashed bundles are probed without manual lists (index file is auto-discovered; override with `index_html_path` only if needed).
@@ -44,12 +44,13 @@ jobs:
 ```
 
 Notes:
-- Use `project_secrets` for env vars synced to Deno project secrets (`SECRET_NAME=ENV_VAR` per line). App reads via `Deno.env.get('SECRET_NAME')`.
+- Use `project_secrets` to forward env vars to the deployment (`SECRET_NAME=ENV_VAR` per line). They are not persisted on Deno Deploy; if you need persistence, set them in the Deploy dashboard.
 - Org-level secrets (`SUPABASE_URL`, `SUPABASE_ANON_KEY`) are shared; no repo-specific copies needed.
 - Customize `include` for build output dirs (e.g., `static/dist/**`).
 - Set `bun_version`/`node_version` and commands for repos with builds. If you use Bun, prefer `bun_version: 1.3.x` (latest as of Dec 2025) instead of older 1.2.x pins.
 - To opt out of PR comments, set `comment_pr: false` in `with:`.
-- Secrets managed entirely in GitHub UI—update secret, next deploy syncs to Deno.
+- `forward_all_secrets: true` (opt-in) forwards all available GitHub secrets as runtime env vars; defaults exclude `DENO_DEPLOY_TOKEN` and `GITHUB_TOKEN`.
+- Secrets managed in GitHub UI—update secret, next deploy forwards it.
 
 ### Bun usage (Dec 2025)
 
