@@ -142,6 +142,11 @@ on:
         required: false
         type: boolean
         default: true
+      comment_pr:
+        description: Post/update a deployment comment on pull requests
+        required: false
+        type: boolean
+        default: true
       prod_branch:
         description: Branch name for production deployments
         required: false
@@ -162,6 +167,7 @@ on:
 permissions:
   contents: read
   id-token: write
+  issues: write
 
 jobs:
   deploy:
@@ -190,6 +196,7 @@ jobs:
       INSTALL_COMMAND: ${{ inputs.install_command }}
       CREATE_PREVIEW: ${{ inputs.create_preview }}
       VERIFY_URL: ${{ inputs.verify_url }}
+      COMMENT_PR: ${{ inputs.comment_pr }}
       INDEX_HTML_PATH: ${{ inputs.index_html_path }}
       EXTRA_PATHS: ${{ inputs.extra_paths }}
       DEBUG_FETCH_PATHS_INPUT: ${{ inputs.debug_fetch_paths }}
@@ -717,6 +724,155 @@ jobs:
             URL="$fallback"
           fi
           echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Comment deployment URL on PR
+        if: steps.preflight.outputs.deploy == 'yes' && github.event_name == 'pull_request' && env.COMMENT_PR == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          TARGET_PROJECT: ${{ steps.deploy.outputs.project }}
+          MODE: ${{ steps.deploy.outputs.mode }}
+          FALLBACK_URL: ${{ steps.deployed_url.outputs.url || format('https://{0}.deno.dev', steps.deploy.outputs.project) }}
+        run: |
+          set -euo pipefail
+          marker="<!-- deno-deploy-preview -->"
+          project="${TARGET_PROJECT}"
+          sha="${SHA}"
+          url="${FALLBACK_URL}"
+
+          # Try to fetch a commit-specific deployment URL from the Deno Deploy API.
+          api="https://api.deno.com/v1"
+          proj_resp="$(curl -sS -H "Authorization: Bearer $DENO_DEPLOY_TOKEN" "${api}/projects?name=${project}" || true)"
+          project_id="$(
+            RESP="$proj_resp" cat <<'PY' | sed 's/^  //' | python -
+              import json, os, sys
+              resp = os.environ.get("RESP", "")
+              pid = ""
+              try:
+                  data = json.loads(resp or "{}")
+                  projects = data.get("projects") or data.get("items") or []
+                  if isinstance(projects, list) and projects:
+                      first = projects[0] or {}
+                      if isinstance(first, dict):
+                          pid = first.get("id") or first.get("projectId") or ""
+              except Exception:
+                  pid = ""
+              print(pid, end="")
+          PY
+          )"
+
+          if [ -n "$project_id" ]; then
+            dep_resp="$(curl -sS -H "Authorization: Bearer $DENO_DEPLOY_TOKEN" "${api}/projects/${project_id}/deployments?commitSha=${sha}&limit=1" || true)"
+            dep_url="$(
+              RESP="$dep_resp" cat <<'PY' | sed 's/^  //' | python -
+                import json, os
+                resp = os.environ.get("RESP", "")
+                url = ""
+                try:
+                    data = json.loads(resp or "{}")
+                    deployments = data.get("deployments") or data.get("items") or []
+                    if isinstance(deployments, list) and deployments:
+                        first = deployments[0] or {}
+                        if isinstance(first, dict):
+                            url = first.get("url") or ""
+                except Exception:
+                    url = ""
+                print(url, end="")
+          PY
+            )"
+            if [ -n "$dep_url" ]; then
+              url="$dep_url"
+            fi
+          fi
+
+          comments_url="https://api.github.com/repos/${REPO}/issues/${PR_NUMBER}/comments"
+          comments="$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$comments_url" || echo "[]")"
+
+          existing_id="$(
+            COMMENTS="$comments" MARKER="$marker" cat <<'PY' | sed 's/^  //' | python -
+              import json, os, sys
+              comments = json.loads(os.environ.get("COMMENTS", "[]") or "[]")
+              marker = os.environ.get("MARKER", "")
+              for c in comments:
+                  body = (c or {}).get("body") or ""
+                  if marker and marker in body:
+                      print((c or {}).get("id") or "", end="")
+                      sys.exit(0)
+              print("", end="")
+          PY
+          )"
+
+          existing_body="$(
+            COMMENTS="$comments" ID="$existing_id" cat <<'PY' | sed 's/^  //' | python -
+              import json, os
+              comments = json.loads(os.environ.get("COMMENTS", "[]") or "[]")
+              cid = os.environ.get("ID", "")
+              body = ""
+              for c in comments:
+                  if str((c or {}).get("id")) == str(cid):
+                      body = (c or {}).get("body") or ""
+                      break
+              print(body, end="")
+          PY
+          )"
+
+          new_body="$(
+            EXISTING_BODY="$existing_body" MARKER="$marker" PROJECT="$project" URL="$url" SHA="$sha" MODE="$MODE" cat <<'PY' | sed 's/^  //' | python -
+              import os, re
+
+              marker = os.environ.get("MARKER", "<!-- deno-deploy-preview -->")
+              project = os.environ.get("PROJECT", "")
+              url = os.environ.get("URL", "")
+              sha = os.environ.get("SHA", "")
+              mode = os.environ.get("MODE", "preview")
+
+              body = os.environ.get("EXISTING_BODY", "") or ""
+              entries = {}
+              if marker in body:
+                  for line in body.splitlines():
+                      m = re.match(r"-\s+`([^`]+)`:\s*(\S+)", line.strip())
+                      if m:
+                          entries[m.group(1)] = m.group(2)
+
+              if project and url:
+                  entries[project] = url
+
+              lines = [marker, "### Deno Deploy Previews", ""]
+              for p in sorted(entries.keys()):
+                  lines.append(f"- `{p}`: {entries[p]}")
+              lines.append("")
+              short_sha = sha[:7] if sha else ""
+              note = f"_Updated from `{short_sha}` ({mode})._" if short_sha else f"_Updated ({mode})._"
+              lines.append(note)
+              print("\n".join(lines), end="")
+          PY
+          )"
+
+          payload="$(
+            BODY="$new_body" cat <<'PY' | sed 's/^  //' | python -
+              import json, os
+              print(json.dumps({"body": os.environ.get("BODY", "")}))
+          PY
+          )"
+
+          if [ -n "$existing_id" ]; then
+            curl -sS -X PATCH \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/issues/comments/${existing_id}" \
+              -d "$payload" >/dev/null
+            echo "Updated PR comment ${existing_id} with ${project} -> ${url}"
+          else
+            curl -sS -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "$comments_url" \
+              -d "$payload" >/dev/null
+            echo "Created PR comment for ${project} -> ${url}"
+          fi
 
       - name: Verify deployment
         if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true'

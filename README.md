@@ -14,6 +14,7 @@ This repository provides a standardized, reusable Deno Deploy workflow at `.gith
 - Runtime env var forwarding (preferred over env_var_keys for simplicity).
 - Post-deploy URL verification and HTTP probing, auto-extracting asset paths from your built `index.html` so hashed bundles are probed without manual lists (index file is auto-discovered; override with `index_html_path` only if needed).
 - Preflight checks for required secrets (skips deploy if missing).
+- On `pull_request` runs, posts/updates a PR comment with preview deployment URLs (disable with `comment_pr: false`).
 
 ## How to use (standardized template)
 
@@ -47,6 +48,7 @@ Notes:
 - Org-level secrets (`SUPABASE_URL`, `SUPABASE_ANON_KEY`) are shared; no repo-specific copies needed.
 - Customize `include` for build output dirs (e.g., `static/dist/**`).
 - Set `bun_version`/`node_version` and commands for repos with builds. If you use Bun, prefer `bun_version: 1.3.x` (latest as of Dec 2025) instead of older 1.2.x pins.
+- To opt out of PR comments, set `comment_pr: false` in `with:`.
 - Secrets managed entirely in GitHub UI—update secret, next deploy syncs to Deno.
 
 ### Bun usage (Dec 2025)
