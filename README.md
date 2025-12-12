@@ -46,8 +46,21 @@ Notes:
 - Use `project_secrets` for env vars synced to Deno project secrets (`SECRET_NAME=ENV_VAR` per line). App reads via `Deno.env.get('SECRET_NAME')`.
 - Org-level secrets (`SUPABASE_URL`, `SUPABASE_ANON_KEY`) are shared; no repo-specific copies needed.
 - Customize `include` for build output dirs (e.g., `static/dist/**`).
-- Set `bun_version`/`node_version` and commands for repos with builds.
+- Set `bun_version`/`node_version` and commands for repos with builds. If you use Bun, prefer `bun_version: 1.3.x` (latest as of Dec 2025) instead of older 1.2.x pins.
 - Secrets managed entirely in GitHub UI—update secret, next deploy syncs to Deno.
+
+### Bun usage (Dec 2025)
+
+- Recommended version: `1.3.x` (latest patch is 1.3.4 as of Dec 2025). The reusable workflow auto-defaults to `1.3.x` when it detects `bun` in install/build commands and no `bun_version` is provided.
+- Valid install example (avoids unsupported flags):
+  ```yaml
+  with:
+    bun_version: 1.3.x
+    install_command: |
+      HUSKY=0 bun install --registry=https://registry.npmjs.org
+    build_command: bun run build
+  ```
+- Avoid `--backend=npm` (not a recognized Bun flag); use `--registry` or env vars for registries instead.
 
 ## Migrated Subdomains
 

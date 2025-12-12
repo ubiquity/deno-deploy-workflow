@@ -223,6 +223,18 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
+      - name: Default Bun version (auto-detect)
+        run: |
+          set -euo pipefail
+          if [ -n "${BUN_VERSION:-}" ]; then
+            exit 0
+          fi
+
+          if printf '%s\n%s\n' "$INSTALL_COMMAND" "$BUILD_COMMAND" | grep -q 'bun '; then
+            echo "BUN_VERSION=1.3.x" >> "$GITHUB_ENV"
+            echo "Detected bun usage; defaulting BUN_VERSION=1.3.x"
+          fi
+
       - name: Install Bun (optional)
         if: env.BUN_VERSION != ''
         run: |
@@ -230,6 +242,13 @@ jobs:
           # Use the official install script to avoid setup-bun cache/download flakes.
           BUN_VERSION="${BUN_VERSION}" curl -fsSL https://bun.sh/install | bash
           echo "${HOME}/.bun/bin" >> "$GITHUB_PATH"
+
+      - name: Show tool versions
+        run: |
+          set -euo pipefail
+          deno --version
+          if command -v node >/dev/null 2>&1; then node -v; fi
+          if command -v bun >/dev/null 2>&1; then bun --version; fi
 
       - name: Install deployctl
         run: |
