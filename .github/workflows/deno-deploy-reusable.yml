@@ -223,6 +223,18 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
+      - name: Default Bun version (auto-detect)
+        run: |
+          set -euo pipefail
+          if [ -n "${BUN_VERSION:-}" ]; then
+            exit 0
+          fi
+
+          if printf '%s\n%s\n' "$INSTALL_COMMAND" "$BUILD_COMMAND" | grep -q 'bun '; then
+            echo "BUN_VERSION=1.3.x" >> "$GITHUB_ENV"
+            echo "Detected bun usage; defaulting BUN_VERSION=1.3.x"
+          fi
+
       - name: Install Bun (optional)
         if: env.BUN_VERSION != ''
         run: |
@@ -230,6 +242,13 @@ jobs:
           # Use the official install script to avoid setup-bun cache/download flakes.
           BUN_VERSION="${BUN_VERSION}" curl -fsSL https://bun.sh/install | bash
           echo "${HOME}/.bun/bin" >> "$GITHUB_PATH"
+
+      - name: Show tool versions
+        run: |
+          set -euo pipefail
+          deno --version
+          if command -v node >/dev/null 2>&1; then node -v; fi
+          if command -v bun >/dev/null 2>&1; then bun --version; fi
 
       - name: Install deployctl
         run: |
@@ -735,6 +754,9 @@ jobs:
             base="https://${{ steps.deploy.outputs.project }}.deno.dev"
           fi
           ok_codes="200 301 302 304 308"
+          # Retry a few times for transient deployctl/edge blips (occasionally returns 5xx/000 right after deploy).
+          retryable_codes="000 429 500 502 503 504 599"
+          max_attempts=3
           misses=()
           summary=""
 
@@ -746,11 +768,29 @@ jobs:
               /*) url="${base%/}$raw" ;;
               *) url="${base%/}/$raw" ;;
             esac
-            http_code=$(curl -sS -o /dev/null -w "%{http_code}" "$url" || echo "000")
+            attempt=1
+            http_code="000"
+            while true; do
+              http_code=$(curl -sS -o /dev/null -w "%{http_code}" "$url" || echo "000")
+              if echo "$ok_codes" | grep -q "\b$http_code\b"; then
+                break
+              fi
+              if echo "$retryable_codes" | grep -q "\b$http_code\b" && [ $attempt -lt $max_attempts ]; then
+                sleep $(( attempt * 2 ))
+                attempt=$(( attempt + 1 ))
+                continue
+              fi
+              break
+            done
+
             if echo "$ok_codes" | grep -q "\b$http_code\b"; then
-              summary+="- [ok] $url (HTTP $http_code)\n"
+              note=""
+              if [ $attempt -gt 1 ]; then
+                note=" after ${attempt} attempts"
+              fi
+              summary+="- [ok] $url (HTTP $http_code${note})\n"
             else
-              summary+="- [miss] $url (HTTP $http_code)\n"
+              summary+="- [miss] $url (HTTP $http_code after ${attempt} attempts)\n"
               misses+=("$url")
             fi
           done <<< "$DEBUG_FETCH_PATHS"
