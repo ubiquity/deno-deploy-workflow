@@ -316,6 +316,10 @@ jobs:
             echo "::error::Project name must end with '-ubq-fi' to match router mapping. Got: $project"
             exit 1
           fi
+          if ! [[ "$project" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+            echo "::error::Project name must be DNS-safe (lowercase letters, numbers, hyphens; no leading/trailing hyphen). Got: $project"
+            exit 1
+          fi
           if [ ${#project} -gt 26 ]; then
             echo "::error::Base project name '${project}' exceeds 26 characters (Deno Deploy's max project name character limit)"
             exit 1
@@ -335,6 +339,10 @@ jobs:
 
           if [ ${#preview} -gt 26 ]; then
             echo "::error::Preview project name '${preview}' exceeds 26 characters (Deno Deploy's max project name character limit)"
+            exit 1
+          fi
+          if ! [[ "$preview" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+            echo "::error::Preview project name must be DNS-safe (lowercase letters, numbers, hyphens; no leading/trailing hyphen). Got: $preview"
             exit 1
           fi
 
@@ -529,7 +537,7 @@ jobs:
 
           tmp_out="$(mktemp)"
           python - <<'PY' > "$tmp_out"
-          import json, os, re, sys
+          import json, os, re
 
           raw = os.environ.get("ALL_SECRETS_JSON", "") or "{}"
           try:
