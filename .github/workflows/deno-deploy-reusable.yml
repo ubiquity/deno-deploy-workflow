@@ -86,6 +86,18 @@ on:
         required: false
         type: string
         default: ""
+      forward_all_secrets:
+        description: Forward all available GitHub secrets as runtime env vars (dangerous; opt-in)
+        required: false
+        type: boolean
+        default: false
+      forward_all_secrets_exclude:
+        description: Newline-separated secret names to exclude when forward_all_secrets is true
+        required: false
+        type: string
+        default: |
+          DENO_DEPLOY_TOKEN
+          GITHUB_TOKEN
       ensure_project:
         description: Ensure the target project exists via Deno Deploy API before deploying
         required: false
@@ -142,6 +154,11 @@ on:
         required: false
         type: boolean
         default: true
+      comment_pr:
+        description: Post/update a deployment comment on pull requests
+        required: false
+        type: boolean
+        default: true
       prod_branch:
         description: Branch name for production deployments
         required: false
@@ -154,6 +171,8 @@ on:
         required: false
       SUPABASE_ANON_KEY:
         required: false
+      SUPABASE_SERVICE_ROLE_KEY:
+        required: false
       DENO_PROJECT_SECRETS:
         required: false
       DENO_PREVIEW_PROJECT_SECRETS:
@@ -161,7 +180,8 @@ on:
 
 permissions:
   contents: read
-  id-token: write
+  issues: write
+  pull-requests: write
 
 jobs:
   deploy:
@@ -182,6 +202,8 @@ jobs:
       RUNTIME_ENV_KEYS: ${{ inputs.env_var_keys }}
       RUNTIME_ENV: ${{ inputs.runtime_env }}
       BUILD_ENV: ${{ inputs.build_env }}
+      FORWARD_ALL_SECRETS: ${{ inputs.forward_all_secrets }}
+      FORWARD_ALL_SECRETS_EXCLUDE: ${{ inputs.forward_all_secrets_exclude }}
       ENSURE_PROJECT: ${{ inputs.ensure_project }}
       PROJECT_SECRETS: ${{ inputs.project_secrets != '' && inputs.project_secrets || secrets.DENO_PROJECT_SECRETS || '' }}
       PREVIEW_PROJECT_SECRETS: ${{ inputs.preview_project_secrets != '' && inputs.preview_project_secrets || secrets.DENO_PREVIEW_PROJECT_SECRETS || '' }}
@@ -190,6 +212,7 @@ jobs:
       INSTALL_COMMAND: ${{ inputs.install_command }}
       CREATE_PREVIEW: ${{ inputs.create_preview }}
       VERIFY_URL: ${{ inputs.verify_url }}
+      COMMENT_PR: ${{ inputs.comment_pr }}
       INDEX_HTML_PATH: ${{ inputs.index_html_path }}
       EXTRA_PATHS: ${{ inputs.extra_paths }}
       DEBUG_FETCH_PATHS_INPUT: ${{ inputs.debug_fetch_paths }}
@@ -203,6 +226,7 @@ jobs:
       # while still allowing repo-specific secrets to override.
       SUPABASE_URL: ${{ vars.SUPABASE_URL || secrets.SUPABASE_URL || '' }}
       SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY || secrets.SUPABASE_ANON_KEY || '' }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ vars.SUPABASE_SERVICE_ROLE_KEY || secrets.SUPABASE_SERVICE_ROLE_KEY || '' }}
       NPM_CONFIG_REGISTRY: https://registry.npmjs.org
 
     steps:
@@ -292,6 +316,10 @@ jobs:
             echo "::error::Project name must end with '-ubq-fi' to match router mapping. Got: $project"
             exit 1
           fi
+          if ! [[ "$project" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+            echo "::error::Project name must be DNS-safe (lowercase letters, numbers, hyphens; no leading/trailing hyphen). Got: $project"
+            exit 1
+          fi
           if [ ${#project} -gt 26 ]; then
             echo "::error::Base project name '${project}' exceeds 26 characters (Deno Deploy's max project name character limit)"
             exit 1
@@ -311,6 +339,10 @@ jobs:
 
           if [ ${#preview} -gt 26 ]; then
             echo "::error::Preview project name '${preview}' exceeds 26 characters (Deno Deploy's max project name character limit)"
+            exit 1
+          fi
+          if ! [[ "$preview" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+            echo "::error::Preview project name must be DNS-safe (lowercase letters, numbers, hyphens; no leading/trailing hyphen). Got: $preview"
             exit 1
           fi
 
@@ -496,6 +528,64 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_ENV"
 
+      - name: Forward all GitHub secrets (runtime)
+        if: steps.preflight.outputs.deploy == 'yes' && env.FORWARD_ALL_SECRETS == 'true'
+        env:
+          ALL_SECRETS_JSON: ${{ toJson(secrets) }}
+        run: |
+          set -euo pipefail
+
+          tmp_out="$(mktemp)"
+          python - <<'PY' > "$tmp_out"
+          import json, os, re
+
+          raw = os.environ.get("ALL_SECRETS_JSON", "") or "{}"
+          try:
+              data = json.loads(raw)
+          except Exception:
+              data = {}
+
+          exclude = {
+              k.strip()
+              for k in (os.environ.get("FORWARD_ALL_SECRETS_EXCLUDE", "") or "").splitlines()
+              if k.strip()
+          }
+          valid = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+          lines = []
+          for k, v in data.items():
+              if k in exclude:
+                  continue
+              if not valid.match(k):
+                  continue
+              if v is None:
+                  continue
+              v = str(v)
+              if not v:
+                  continue
+              if "\n" in v or "\r" in v:
+                  continue
+              lines.append(f"{k}={v}")
+
+          sys.stdout.write("\n".join(lines))
+          PY
+
+          extra_runtime="$(cat "$tmp_out")"
+          rm -f "$tmp_out"
+          [ -z "$extra_runtime" ] && exit 0
+
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            echo "::add-mask::${line#*=}"
+          done <<< "$extra_runtime"
+
+          combined="$(printf '%s\n' "$RUNTIME_ENV" "$extra_runtime" | tr -d '\r' | sed '/^$/d')"
+          {
+            echo "RUNTIME_ENV<<EOF"
+            echo "$combined"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
       - name: Ensure project exists and sync secrets
         if: steps.preflight.outputs.deploy == 'yes'
         env:
@@ -551,6 +641,8 @@ jobs:
           rm -f "$tmp_resp"
 
           if [ -n "$secrets_block" ]; then
+            echo "::warning::project_secrets persistence via dash.deno.com API is no longer supported; forwarding these as runtime env for this deploy only."
+            extra_runtime=""
             while IFS= read -r line; do
               line=$(echo "$line" | tr -d '\r' | xargs)
               [ -z "$line" ] && continue
@@ -570,20 +662,17 @@ jobs:
                 continue
               fi
               echo "::add-mask::$val"
-              tmp_secret="$(mktemp)"
-              code=$(curl -sS -o "$tmp_secret" -w "%{http_code}" \
-                -X POST "$api_base/$project/secrets" \
-                -H "Authorization: Bearer $DENO_DEPLOY_TOKEN" \
-                -H "Content-Type: application/json" \
-                -d "{\"name\":\"$secret_name\",\"value\":\"$val\"}" || echo "000")
-              if [ "$code" != "200" ]; then
-                echo "::error::Failed to set secret $secret_name (HTTP $code)"
-                cat "$tmp_secret" || true
-                rm -f "$tmp_secret"
-                exit 1
-              fi
-              rm -f "$tmp_secret"
+              extra_runtime+=$'\n'"${secret_name}=${val}"
             done <<< "$secrets_block"
+
+            if [ -n "$extra_runtime" ]; then
+              combined="$(printf '%s\n' "$RUNTIME_ENV" "$extra_runtime" | tr -d '\r' | sed '/^$/d')"
+              {
+                echo "RUNTIME_ENV<<EOF"
+                echo "$combined"
+                echo "EOF"
+              } >> "$GITHUB_ENV"
+            fi
           fi
 
       - name: Deploy to Deno Deploy
@@ -651,15 +740,23 @@ jobs:
           start_time=$(date +%s)
           # Leave a small buffer so verify/summary steps can complete before hitting the 6h Actions limit.
           max_seconds=$(( 6 * 60 * 60 - 300 ))
-          while true; do
-            set +e
-            output=$(deployctl deploy "${flags[@]}" 2>&1)
-            status=$?
-            set -e
-            if [ $status -eq 0 ]; then
-              echo "$output"
-              break
-            fi
+            while true; do
+              set +e
+              output=$(deployctl deploy "${flags[@]}" 2>&1)
+              status=$?
+              set -e
+              if [ $status -eq 0 ]; then
+                echo "$output"
+                deployment_url="$(printf '%s\n' "$output" | grep -oE "https://${target}-[A-Za-z0-9]+\\.deno\\.dev" | head -n 1 || true)"
+                if [ -z "$deployment_url" ]; then
+                  deployment_url="$(printf '%s\n' "$output" | grep -oE "https://${target}\\.deno\\.dev" | head -n 1 || true)"
+                fi
+                if [ -z "$deployment_url" ]; then
+                  deployment_url="https://${target}.deno.dev"
+                fi
+                echo "deployment_url=$deployment_url" >> "$GITHUB_OUTPUT"
+                break
+              fi
             if echo "$output" | grep -q "Too many deployments created per hour"; then
               now=$(date +%s)
               elapsed=$(( now - start_time ))
@@ -685,38 +782,368 @@ jobs:
           echo "project=$target" >> "$GITHUB_OUTPUT"
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
 
-      - name: Determine deployed URL
-        if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true'
+      - name: Compute deployed URLs
+        if: steps.preflight.outputs.deploy == 'yes'
         id: deployed_url
+        env:
+          MODE: ${{ steps.deploy.outputs.mode }}
+          TARGET_PROJECT: ${{ steps.deploy.outputs.project }}
+          DEPLOYMENT_URL: ${{ steps.deploy.outputs.deployment_url || '' }}
         run: |
           set -euo pipefail
-          project="${{ steps.deploy.outputs.project }}"
-          fallback="https://${project}.deno.dev"
-          resp=$(curl -sS -H "Authorization: Bearer $DENO_DEPLOY_TOKEN" "https://dash.deno.com/api/projects/${project}" || true)
-          URL=$(PROJECT="$project" FALLBACK="$fallback" RESP="$resp" cat <<'PY' | sed 's/^  //' | python -
-            import json, os, sys
+          mode="${MODE:-}"
+          target_project="${TARGET_PROJECT:-}"
+          prod_project="${PROJECT:-}"
+          deployment_url="${DEPLOYMENT_URL:-}"
 
-            resp = os.environ.get("RESP", "")
-            fallback = os.environ.get("FALLBACK", "")
-            url = fallback
-            try:
-                data = json.loads(resp or "{}")
-                domains = data.get("domains") or []
-                if isinstance(domains, list) and domains:
-                    dom = domains[0]
-                    if isinstance(dom, dict):
-                        dom = dom.get("domain") or dom.get("name") or ""
-                    if dom:
-                        url = f"https://{dom}"
-            except Exception as exc:  # noqa: BLE001
-                sys.stderr.write(f"Warning: failed to parse project domains: {exc}\n")
-            print(url, end="")
-          PY
-          )
-          if [ -z "$URL" ]; then
-            URL="$fallback"
+          project_url="https://${target_project}.deno.dev"
+          router_url=""
+
+          base=""
+          if [[ "$prod_project" == *-ubq-fi ]]; then
+            base="${prod_project%-ubq-fi}"
           fi
-          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+          if [ -n "$base" ]; then
+            if [ "$mode" = "production" ]; then
+              router_url="https://${base}.ubq.fi"
+            else
+              router_url="https://preview-${base}.ubq.fi"
+            fi
+          fi
+
+          if [ -z "$deployment_url" ]; then
+            deployment_url="$project_url"
+          fi
+
+          {
+            echo "project_url=$project_url"
+            echo "deployment_url=$deployment_url"
+            echo "router_url=$router_url"
+            echo "url=$deployment_url"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Comment deployment URL on PR
+        if: steps.preflight.outputs.deploy == 'yes' && env.COMMENT_PR == 'true' && steps.deploy.outputs.mode == 'preview' && (github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          TARGET_PROJECT: ${{ steps.deploy.outputs.project }}
+          MODE: ${{ steps.deploy.outputs.mode }}
+          DEPLOYMENT_URL: ${{ steps.deployed_url.outputs.deployment_url || format('https://{0}.deno.dev', steps.deploy.outputs.project) }}
+          PROJECT_URL: ${{ steps.deployed_url.outputs.project_url || format('https://{0}.deno.dev', steps.deploy.outputs.project) }}
+          ROUTER_URL: ${{ steps.deployed_url.outputs.router_url || '' }}
+        run: |
+          set -euo pipefail
+          marker="<!-- deno-deploy-preview -->"
+          project="${TARGET_PROJECT}"
+          sha="${SHA}"
+          deployment_url="${DEPLOYMENT_URL:-}"
+          project_url="${PROJECT_URL:-}"
+          router_url="${ROUTER_URL:-}"
+          if [ -z "$deployment_url" ]; then
+            deployment_url="$project_url"
+          fi
+          url_line="<${deployment_url}>"
+          if [ -n "$router_url" ] && [ "$router_url" != "$deployment_url" ]; then
+            url_line="<${deployment_url}> (router: <${router_url}>)"
+          elif [ -n "$project_url" ] && [ "$project_url" != "$deployment_url" ]; then
+            url_line="<${deployment_url}> (project: <${project_url}>)"
+          fi
+          timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          run_url="${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}"
+
+          pr_number="${PR_NUMBER:-}"
+          if [ -z "$pr_number" ]; then
+            pulls_url="https://api.github.com/repos/${REPO}/commits/${sha}/pulls"
+            pulls_resp="$(mktemp)"
+            pulls_code="$(curl -sS -o "$pulls_resp" -w "%{http_code}" -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "$pulls_url" || echo "000")"
+            pulls_json="$(cat "$pulls_resp" || true)"
+            rm -f "$pulls_resp"
+            if [ "$pulls_code" != "200" ]; then
+              echo "::warning::Failed to resolve PR via $pulls_url (HTTP $pulls_code)"
+            fi
+            pr_number="$(
+              PULLS_JSON="$pulls_json" python - <<'PY'
+          import json, os
+
+          raw = os.environ.get("PULLS_JSON", "") or "[]"
+          num = ""
+          try:
+              data = json.loads(raw)
+          except Exception:
+              data = []
+
+          if isinstance(data, list) and data:
+              open_prs = [p for p in data if isinstance(p, dict) and p.get("state") == "open"]
+              pr = open_prs[0] if open_prs else data[0]
+              if isinstance(pr, dict):
+                  num = str(pr.get("number") or "")
+
+          print(num, end="")
+          PY
+            )"
+          fi
+
+          if [ -z "$pr_number" ]; then
+            echo "No PR found for commit ${sha}; skipping comment."
+            exit 0
+          fi
+
+          comments_url="https://api.github.com/repos/${REPO}/issues/${pr_number}/comments"
+          comments_resp="$(mktemp)"
+          comments_code="$(curl -sS -o "$comments_resp" -w "%{http_code}" -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "$comments_url" || echo "000")"
+          comments="$(cat "$comments_resp" || echo "[]")"
+          rm -f "$comments_resp"
+          if [ "$comments_code" -lt 200 ] || [ "$comments_code" -ge 300 ]; then
+            echo "::warning::Failed to list PR comments (HTTP $comments_code) for $comments_url"
+            comments="[]"
+          fi
+
+          existing_id="$(
+            COMMENTS="$comments" MARKER="$marker" python - <<'PY'
+          import json, os, sys
+
+          raw = os.environ.get("COMMENTS", "") or "[]"
+          marker = os.environ.get("MARKER", "")
+          try:
+              data = json.loads(raw)
+          except Exception:
+              data = []
+          if not isinstance(data, list):
+              data = []
+
+          for c in data:
+              body = (c or {}).get("body") or ""
+              if marker and marker in body:
+                  print((c or {}).get("id") or "", end="")
+                  sys.exit(0)
+          print("", end="")
+          PY
+          )"
+
+          existing_body="$(
+            COMMENTS="$comments" ID="$existing_id" python - <<'PY'
+          import json, os
+
+          raw = os.environ.get("COMMENTS", "") or "[]"
+          cid = os.environ.get("ID", "")
+          try:
+              data = json.loads(raw)
+          except Exception:
+              data = []
+          if not isinstance(data, list):
+              data = []
+
+          body = ""
+          for c in data:
+              if str((c or {}).get("id")) == str(cid):
+                  body = (c or {}).get("body") or ""
+                  break
+          print(body, end="")
+          PY
+          )"
+
+          new_body="$(
+            EXISTING_BODY="$existing_body" MARKER="$marker" PROJECT="$project" URL_LINE="$url_line" SHA="$sha" MODE="$MODE" TIMESTAMP="$timestamp" RUN_URL="$run_url" python - <<'PY'
+          import json, os, re
+          
+          marker = os.environ.get("MARKER", "<!-- deno-deploy-preview -->")
+          project = os.environ.get("PROJECT", "")
+          url_line = os.environ.get("URL_LINE", "")
+          sha = os.environ.get("SHA", "")
+          mode = os.environ.get("MODE", "preview")
+          timestamp = os.environ.get("TIMESTAMP", "")
+          run_url = os.environ.get("RUN_URL", "")
+
+          body = os.environ.get("EXISTING_BODY", "") or ""
+          if "\\n" in body and "\n" not in body:
+              body = body.replace("\\n", "\n")
+          
+          data_prefix = "<!-- deno-deploy-preview:data "
+          data_json = ""
+          has_data = False
+          data_start = body.find(data_prefix)
+          if data_start != -1:
+              data_start += len(data_prefix)
+              data_end = body.find("-->", data_start)
+              if data_end != -1:
+                  data_json = body[data_start:data_end].strip()
+                  has_data = True
+
+          data = {}
+          if has_data and data_json:
+              try:
+                  data = json.loads(data_json)
+              except Exception:
+                  data = {}
+                  has_data = False
+          if not isinstance(data, dict):
+              data = {}
+              has_data = False
+
+          projects = data.get("projects")
+          if not isinstance(projects, dict):
+              projects = {}
+
+          if not has_data and marker in body:
+              legacy_entries = {}
+              for line in body.splitlines():
+                  m = re.match(r"-\\s+`([^`]+)`:\\s*(.+)", line.strip())
+                  if m:
+                      legacy_entries[m.group(1)] = m.group(2).strip()
+
+              legacy_sha = ""
+              legacy_mode = ""
+              note_match = re.search(r"_Updated from `([^`]+)` \\(([^)]+)\\)\\._", body)
+              if note_match:
+                  legacy_sha = note_match.group(1)
+                  legacy_mode = note_match.group(2)
+
+              for p, line in legacy_entries.items():
+                  if not line:
+                      continue
+                  projects.setdefault(p, []).append(
+                      {"ts": "", "sha": legacy_sha, "mode": legacy_mode, "url_line": line, "run_url": ""}
+                  )
+
+          if project and url_line:
+              history = projects.setdefault(project, [])
+              if not isinstance(history, list):
+                  history = []
+                  projects[project] = history
+              if not history or history[-1].get("url_line") != url_line:
+                  history.append(
+                      {
+                          "ts": timestamp,
+                          "sha": sha,
+                          "mode": mode,
+                          "url_line": url_line,
+                          "run_url": run_url,
+                      }
+                  )
+
+          def render(pdata: dict, truncated: bool) -> str:
+              payload = {"version": 1, "projects": pdata}
+              data_line = "<!-- deno-deploy-preview:data " + json.dumps(
+                  payload, separators=(",", ":"), sort_keys=True
+              ) + " -->"
+
+              lines = [marker, data_line, "### Deno Deploy Previews", ""]
+              for p in sorted(pdata.keys()):
+                  lines.append(f"- `{p}`")
+                  history = pdata.get(p) or []
+                  if isinstance(history, list):
+                      for entry in reversed(history):
+                          entry = entry or {}
+                          ts = entry.get("ts") or ""
+                          sha_val = entry.get("sha") or ""
+                          sha_short = sha_val[:7] if sha_val else ""
+                          mode_val = entry.get("mode") or ""
+                          url_val = entry.get("url_line") or ""
+                          run_val = entry.get("run_url") or ""
+
+                          prefix_bits = []
+                          if ts:
+                              prefix_bits.append(ts)
+                          if sha_short:
+                              prefix_bits.append(f"`{sha_short}`")
+                          if mode_val:
+                              prefix_bits.append(f"({mode_val})")
+                          prefix = " ".join(prefix_bits).strip()
+
+                          line = f"  - {prefix}: {url_val}" if prefix else f"  - {url_val}"
+                          if run_val:
+                              if not (run_val.startswith("<") and run_val.endswith(">")):
+                                  run_val = f"<{run_val}>"
+                              line += f" (run: {run_val})"
+                          lines.append(line)
+                  lines.append("")
+
+              while lines and lines[-1] == "":
+                  lines.pop()
+              if truncated:
+                  lines.append("")
+                  lines.append("_History truncated to fit GitHub comment size limits._")
+              return "\n".join(lines)
+
+          MAX_BODY_CHARS = 60000
+          truncated = False
+          rendered = render(projects, truncated=False)
+          while len(rendered) > MAX_BODY_CHARS:
+              longest = None
+              for p, history in projects.items():
+                  if not isinstance(history, list) or len(history) <= 1:
+                      continue
+                  if longest is None or len(history) > len(projects[longest]):
+                      longest = p
+              if longest is None:
+                  break
+              projects[longest].pop(0)
+              truncated = True
+              rendered = render(projects, truncated=False)
+
+          print(render(projects, truncated=truncated), end="")
+          PY
+          )"
+
+          payload="$(
+            BODY="$new_body" python - <<'PY'
+          import json, os
+          print(json.dumps({"body": os.environ.get("BODY", "")}))
+          PY
+          )"
+
+          tmp_resp="$(mktemp)"
+          http_code="000"
+          if [ -n "$existing_id" ]; then
+            http_code="$(curl -sS -o "$tmp_resp" -w "%{http_code}" -X PATCH \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${REPO}/issues/comments/${existing_id}" \
+              -d "$payload" || echo "000")"
+            if [ "$http_code" != "200" ]; then
+              echo "::error::Failed to update PR comment ${existing_id} (HTTP $http_code)"
+              cat "$tmp_resp" || true
+              rm -f "$tmp_resp"
+              exit 1
+            fi
+            echo "Updated PR comment ${existing_id} with ${project} -> ${url_line} (HTTP $http_code)"
+          else
+            http_code="$(curl -sS -o "$tmp_resp" -w "%{http_code}" -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "$comments_url" \
+              -d "$payload" || echo "000")"
+            if [ "$http_code" != "201" ]; then
+              echo "::error::Failed to create PR comment (HTTP $http_code)"
+              cat "$tmp_resp" || true
+              rm -f "$tmp_resp"
+              exit 1
+            fi
+            new_id="$(
+              RESP_FILE="$tmp_resp" python - <<'PY'
+          import json, os
+
+          path = os.environ.get("RESP_FILE", "")
+          try:
+              with open(path, "r", encoding="utf-8") as f:
+                  data = json.load(f)
+          except Exception:
+              data = {}
+
+          print(str((data or {}).get("id") or ""), end="")
+          PY
+            )"
+            echo "Created PR comment ${new_id:-<unknown>} for ${project} -> ${url_line} (HTTP $http_code)"
+          fi
+          rm -f "$tmp_resp"
 
       - name: Verify deployment
         if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true'
@@ -724,10 +1151,8 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          url='${{ steps.deployed_url.outputs.url }}'
-          if [ -z "$url" ]; then
-            url="https://${{ steps.deploy.outputs.project }}.deno.dev"
-          fi
+          url='${{ steps.deployed_url.outputs.deployment_url }}'
+          if [ -z "$url" ]; then url="https://${{ steps.deploy.outputs.project }}.deno.dev"; fi
           codes_ok="200"
           status="fail"
           http_code="000"
@@ -749,16 +1174,17 @@ jobs:
         if: steps.preflight.outputs.deploy == 'yes' && env.DEBUG_FETCH_PATHS != ''
         run: |
           set -euo pipefail
-          base='${{ steps.deployed_url.outputs.url }}'
-          if [ -z "$base" ]; then
-            base="https://${{ steps.deploy.outputs.project }}.deno.dev"
-          fi
+          base='${{ steps.deployed_url.outputs.deployment_url }}'
+          if [ -z "$base" ]; then base="https://${{ steps.deploy.outputs.project }}.deno.dev"; fi
           ok_codes="200 301 302 304 308"
           # Retry a few times for transient deployctl/edge blips (occasionally returns 5xx/000 right after deploy).
-          retryable_codes="000 429 500 502 503 504 599"
-          max_attempts=3
+          retryable_codes="000 404 429 500 502 503 504 599"
+          max_attempts=6
           misses=()
           summary=""
+
+          # Give the edge a moment to pick up the new deployment before probing assets.
+          sleep 10
 
           while IFS= read -r raw; do
             raw=$(echo "$raw" | tr -d '\r' | xargs)
@@ -811,7 +1237,9 @@ jobs:
         run: |
           mode='${{ steps.deploy.outputs.mode }}'
           project='${{ steps.deploy.outputs.project }}'
-          url="${{ steps.deployed_url.outputs.url || '' }}"
+          deployment_url="${{ steps.deployed_url.outputs.deployment_url || '' }}"
+          project_url="${{ steps.deployed_url.outputs.project_url || '' }}"
+          router_url="${{ steps.deployed_url.outputs.router_url || '' }}"
           http="${{ steps.verify.outputs.http_code || '' }}"
           status="${{ steps.verify.outputs.status || '' }}"
           {
@@ -819,9 +1247,9 @@ jobs:
             echo ""
             echo "- Mode: ${mode:-unknown}"
             echo "- Project: ${project}"
-            if [ -n "$url" ]; then
-              echo "- URL: ${url}"
-            fi
+            if [ -n "$router_url" ]; then echo "- Router URL: ${router_url}"; fi
+            if [ -n "$deployment_url" ]; then echo "- Deployment URL: ${deployment_url}"; fi
+            if [ -n "$project_url" ]; then echo "- Project URL: ${project_url}"; fi
             if [ -n "$http" ]; then
               echo "- HTTP: ${http} (${status})"
             fi
@@ -833,7 +1261,7 @@ jobs:
         run: |
           status='${{ steps.verify.outputs.status || '' }}'
           http='${{ steps.verify.outputs.http_code || '' }}'
-          url='${{ steps.deployed_url.outputs.url || '' }}'
+          url='${{ steps.deployed_url.outputs.deployment_url || '' }}'
           if [ "$status" != "ok" ]; then
             echo "::error::Deployment probe failed with HTTP ${http:-unknown} at ${url:-<missing url>}"
             exit 1
