@@ -840,11 +840,11 @@ jobs:
           if [ -z "$deployment_url" ]; then
             deployment_url="$project_url"
           fi
-          url_line="${deployment_url}"
+          url_line="<${deployment_url}>"
           if [ -n "$router_url" ] && [ "$router_url" != "$deployment_url" ]; then
-            url_line="${deployment_url} (router: ${router_url})"
+            url_line="<${deployment_url}> (router: <${router_url}>)"
           elif [ -n "$project_url" ] && [ "$project_url" != "$deployment_url" ]; then
-            url_line="${deployment_url} (project: ${project_url})"
+            url_line="<${deployment_url}> (project: <${project_url}>)"
           fi
 
           pr_number="${PR_NUMBER:-}"
@@ -949,6 +949,8 @@ jobs:
           mode = os.environ.get("MODE", "preview")
 
           body = os.environ.get("EXISTING_BODY", "") or ""
+          if "\\n" in body and "\n" not in body:
+              body = body.replace("\\n", "\n")
           entries = {}
           if marker in body:
               for line in body.splitlines():
@@ -966,7 +968,7 @@ jobs:
           short_sha = sha[:7] if sha else ""
           note = f"_Updated from `{short_sha}` ({mode})._" if short_sha else f"_Updated ({mode})._"
           lines.append(note)
-          print("\\n".join(lines), end="")
+          print("\n".join(lines), end="")
           PY
           )"
 
