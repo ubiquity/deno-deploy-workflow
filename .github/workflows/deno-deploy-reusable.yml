@@ -956,21 +956,33 @@ jobs:
           if "\\n" in body and "\n" not in body:
               body = body.replace("\\n", "\n")
           
-          data_match = re.search(r"<!--\\s*deno-deploy-preview:data\\s*(\\{.*?\\})\\s*-->", body, re.S)
+          data_prefix = "<!-- deno-deploy-preview:data "
+          data_json = ""
+          has_data = False
+          data_start = body.find(data_prefix)
+          if data_start != -1:
+              data_start += len(data_prefix)
+              data_end = body.find("-->", data_start)
+              if data_end != -1:
+                  data_json = body[data_start:data_end].strip()
+                  has_data = True
+
           data = {}
-          if data_match:
+          if has_data and data_json:
               try:
-                  data = json.loads(data_match.group(1))
+                  data = json.loads(data_json)
               except Exception:
                   data = {}
+                  has_data = False
           if not isinstance(data, dict):
               data = {}
+              has_data = False
 
           projects = data.get("projects")
           if not isinstance(projects, dict):
               projects = {}
 
-          if not data_match and marker in body:
+          if not has_data and marker in body:
               legacy_entries = {}
               for line in body.splitlines():
                   m = re.match(r"-\\s+`([^`]+)`:\\s*(.+)", line.strip())
