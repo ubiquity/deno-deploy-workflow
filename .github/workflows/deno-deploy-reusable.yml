@@ -846,6 +846,8 @@ jobs:
           elif [ -n "$project_url" ] && [ "$project_url" != "$deployment_url" ]; then
             url_line="<${deployment_url}> (project: <${project_url}>)"
           fi
+          timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          run_url="${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}"
 
           pr_number="${PR_NUMBER:-}"
           if [ -z "$pr_number" ]; then
@@ -939,36 +941,133 @@ jobs:
           )"
 
           new_body="$(
-            EXISTING_BODY="$existing_body" MARKER="$marker" PROJECT="$project" URL_LINE="$url_line" SHA="$sha" MODE="$MODE" python - <<'PY'
-          import os, re
-
+            EXISTING_BODY="$existing_body" MARKER="$marker" PROJECT="$project" URL_LINE="$url_line" SHA="$sha" MODE="$MODE" TIMESTAMP="$timestamp" RUN_URL="$run_url" python - <<'PY'
+          import json, os, re
+          
           marker = os.environ.get("MARKER", "<!-- deno-deploy-preview -->")
           project = os.environ.get("PROJECT", "")
           url_line = os.environ.get("URL_LINE", "")
           sha = os.environ.get("SHA", "")
           mode = os.environ.get("MODE", "preview")
+          timestamp = os.environ.get("TIMESTAMP", "")
+          run_url = os.environ.get("RUN_URL", "")
 
           body = os.environ.get("EXISTING_BODY", "") or ""
           if "\\n" in body and "\n" not in body:
               body = body.replace("\\n", "\n")
-          entries = {}
-          if marker in body:
+          
+          data_match = re.search(r"<!--\\s*deno-deploy-preview:data\\s*(\\{.*?\\})\\s*-->", body, re.S)
+          data = {}
+          if data_match:
+              try:
+                  data = json.loads(data_match.group(1))
+              except Exception:
+                  data = {}
+          if not isinstance(data, dict):
+              data = {}
+
+          projects = data.get("projects")
+          if not isinstance(projects, dict):
+              projects = {}
+
+          if not data_match and marker in body:
+              legacy_entries = {}
               for line in body.splitlines():
                   m = re.match(r"-\\s+`([^`]+)`:\\s*(.+)", line.strip())
                   if m:
-                      entries[m.group(1)] = m.group(2).strip()
+                      legacy_entries[m.group(1)] = m.group(2).strip()
+
+              legacy_sha = ""
+              legacy_mode = ""
+              note_match = re.search(r"_Updated from `([^`]+)` \\(([^)]+)\\)\\._", body)
+              if note_match:
+                  legacy_sha = note_match.group(1)
+                  legacy_mode = note_match.group(2)
+
+              for p, line in legacy_entries.items():
+                  if not line:
+                      continue
+                  projects.setdefault(p, []).append(
+                      {"ts": "", "sha": legacy_sha, "mode": legacy_mode, "url_line": line, "run_url": ""}
+                  )
 
           if project and url_line:
-              entries[project] = url_line
+              history = projects.setdefault(project, [])
+              if not isinstance(history, list):
+                  history = []
+                  projects[project] = history
+              if not history or history[-1].get("url_line") != url_line:
+                  history.append(
+                      {
+                          "ts": timestamp,
+                          "sha": sha,
+                          "mode": mode,
+                          "url_line": url_line,
+                          "run_url": run_url,
+                      }
+                  )
 
-          lines = [marker, "### Deno Deploy Previews", ""]
-          for p in sorted(entries.keys()):
-              lines.append(f"- `{p}`: {entries[p]}")
-          lines.append("")
-          short_sha = sha[:7] if sha else ""
-          note = f"_Updated from `{short_sha}` ({mode})._" if short_sha else f"_Updated ({mode})._"
-          lines.append(note)
-          print("\n".join(lines), end="")
+          def render(pdata: dict, truncated: bool) -> str:
+              payload = {"version": 1, "projects": pdata}
+              data_line = "<!-- deno-deploy-preview:data " + json.dumps(
+                  payload, separators=(",", ":"), sort_keys=True
+              ) + " -->"
+
+              lines = [marker, data_line, "### Deno Deploy Previews", ""]
+              for p in sorted(pdata.keys()):
+                  lines.append(f"- `{p}`")
+                  history = pdata.get(p) or []
+                  if isinstance(history, list):
+                      for entry in reversed(history):
+                          entry = entry or {}
+                          ts = entry.get("ts") or ""
+                          sha_val = entry.get("sha") or ""
+                          sha_short = sha_val[:7] if sha_val else ""
+                          mode_val = entry.get("mode") or ""
+                          url_val = entry.get("url_line") or ""
+                          run_val = entry.get("run_url") or ""
+
+                          prefix_bits = []
+                          if ts:
+                              prefix_bits.append(ts)
+                          if sha_short:
+                              prefix_bits.append(f"`{sha_short}`")
+                          if mode_val:
+                              prefix_bits.append(f"({mode_val})")
+                          prefix = " ".join(prefix_bits).strip()
+
+                          line = f"  - {prefix}: {url_val}" if prefix else f"  - {url_val}"
+                          if run_val:
+                              if not (run_val.startswith("<") and run_val.endswith(">")):
+                                  run_val = f"<{run_val}>"
+                              line += f" (run: {run_val})"
+                          lines.append(line)
+                  lines.append("")
+
+              while lines and lines[-1] == "":
+                  lines.pop()
+              if truncated:
+                  lines.append("")
+                  lines.append("_History truncated to fit GitHub comment size limits._")
+              return "\n".join(lines)
+
+          MAX_BODY_CHARS = 60000
+          truncated = False
+          rendered = render(projects, truncated=False)
+          while len(rendered) > MAX_BODY_CHARS:
+              longest = None
+              for p, history in projects.items():
+                  if not isinstance(history, list) or len(history) <= 1:
+                      continue
+                  if longest is None or len(history) > len(projects[longest]):
+                      longest = p
+              if longest is None:
+                  break
+              projects[longest].pop(0)
+              truncated = True
+              rendered = render(projects, truncated=False)
+
+          print(render(projects, truncated=truncated), end="")
           PY
           )"
 
