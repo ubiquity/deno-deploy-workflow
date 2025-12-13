@@ -956,7 +956,7 @@ jobs:
           def strip_router(val: str) -> str:
               if not isinstance(val, str):
                   return ""
-              return re.sub(r"\\s*\\(router: <[^>]+>\\)", "", val).strip()
+              return re.sub(r"\s*\(router: <[^>]+>\)", "", val).strip()
 
           url_line = strip_router(url_line)
 
