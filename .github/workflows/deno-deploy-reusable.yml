@@ -537,7 +537,7 @@ jobs:
 
           tmp_out="$(mktemp)"
           python - <<'PY' > "$tmp_out"
-          import json, os, re
+          import json, os, re, sys
 
           raw = os.environ.get("ALL_SECRETS_JSON", "") or "{}"
           try:
