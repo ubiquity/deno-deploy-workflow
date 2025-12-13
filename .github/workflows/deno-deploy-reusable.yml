@@ -732,15 +732,23 @@ jobs:
           start_time=$(date +%s)
           # Leave a small buffer so verify/summary steps can complete before hitting the 6h Actions limit.
           max_seconds=$(( 6 * 60 * 60 - 300 ))
-          while true; do
-            set +e
-            output=$(deployctl deploy "${flags[@]}" 2>&1)
-            status=$?
-            set -e
-            if [ $status -eq 0 ]; then
-              echo "$output"
-              break
-            fi
+            while true; do
+              set +e
+              output=$(deployctl deploy "${flags[@]}" 2>&1)
+              status=$?
+              set -e
+              if [ $status -eq 0 ]; then
+                echo "$output"
+                deployment_url="$(printf '%s\n' "$output" | grep -oE "https://${target}-[A-Za-z0-9]+\\.deno\\.dev" | head -n 1 || true)"
+                if [ -z "$deployment_url" ]; then
+                  deployment_url="$(printf '%s\n' "$output" | grep -oE "https://${target}\\.deno\\.dev" | head -n 1 || true)"
+                fi
+                if [ -z "$deployment_url" ]; then
+                  deployment_url="https://${target}.deno.dev"
+                fi
+                echo "deployment_url=$deployment_url" >> "$GITHUB_OUTPUT"
+                break
+              fi
             if echo "$output" | grep -q "Too many deployments created per hour"; then
               now=$(date +%s)
               elapsed=$(( now - start_time ))
@@ -772,13 +780,15 @@ jobs:
         env:
           MODE: ${{ steps.deploy.outputs.mode }}
           TARGET_PROJECT: ${{ steps.deploy.outputs.project }}
+          DEPLOYMENT_URL: ${{ steps.deploy.outputs.deployment_url || '' }}
         run: |
           set -euo pipefail
           mode="${MODE:-}"
           target_project="${TARGET_PROJECT:-}"
           prod_project="${PROJECT:-}"
+          deployment_url="${DEPLOYMENT_URL:-}"
 
-          deno_url="https://${target_project}.deno.dev"
+          project_url="https://${target_project}.deno.dev"
           router_url=""
 
           base=""
@@ -794,10 +804,15 @@ jobs:
             fi
           fi
 
+          if [ -z "$deployment_url" ]; then
+            deployment_url="$project_url"
+          fi
+
           {
-            echo "deno_url=$deno_url"
+            echo "project_url=$project_url"
+            echo "deployment_url=$deployment_url"
             echo "router_url=$router_url"
-            echo "url=$deno_url"
+            echo "url=$deployment_url"
           } >> "$GITHUB_OUTPUT"
 
       - name: Comment deployment URL on PR
@@ -811,18 +826,25 @@ jobs:
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           TARGET_PROJECT: ${{ steps.deploy.outputs.project }}
           MODE: ${{ steps.deploy.outputs.mode }}
-          DENO_URL: ${{ steps.deployed_url.outputs.deno_url || format('https://{0}.deno.dev', steps.deploy.outputs.project) }}
+          DEPLOYMENT_URL: ${{ steps.deployed_url.outputs.deployment_url || format('https://{0}.deno.dev', steps.deploy.outputs.project) }}
+          PROJECT_URL: ${{ steps.deployed_url.outputs.project_url || format('https://{0}.deno.dev', steps.deploy.outputs.project) }}
           ROUTER_URL: ${{ steps.deployed_url.outputs.router_url || '' }}
         run: |
           set -euo pipefail
           marker="<!-- deno-deploy-preview -->"
           project="${TARGET_PROJECT}"
-          sha="${SHA}"
-          deno_url="${DENO_URL:-}"
-          router_url="${ROUTER_URL:-}"
-          url_line="${deno_url}"
-          if [ -n "$router_url" ] && [ "$router_url" != "$deno_url" ]; then
-            url_line="${router_url} (deno: ${deno_url})"
+            sha="${SHA}"
+            deployment_url="${DEPLOYMENT_URL:-}"
+            project_url="${PROJECT_URL:-}"
+            router_url="${ROUTER_URL:-}"
+            if [ -z "$deployment_url" ]; then
+              deployment_url="$project_url"
+            fi
+            url_line="${deployment_url}"
+          if [ -n "$router_url" ] && [ "$router_url" != "$deployment_url" ]; then
+            url_line="${deployment_url} (router: ${router_url})"
+          elif [ -n "$project_url" ] && [ "$project_url" != "$deployment_url" ]; then
+            url_line="${deployment_url} (project: ${project_url})"
           fi
 
           pr_number="${PR_NUMBER:-}"
@@ -964,7 +986,7 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          url='${{ steps.deployed_url.outputs.deno_url }}'
+          url='${{ steps.deployed_url.outputs.deployment_url }}'
           if [ -z "$url" ]; then url="https://${{ steps.deploy.outputs.project }}.deno.dev"; fi
           codes_ok="200"
           status="fail"
@@ -987,7 +1009,7 @@ jobs:
         if: steps.preflight.outputs.deploy == 'yes' && env.DEBUG_FETCH_PATHS != ''
         run: |
           set -euo pipefail
-          base='${{ steps.deployed_url.outputs.deno_url }}'
+          base='${{ steps.deployed_url.outputs.deployment_url }}'
           if [ -z "$base" ]; then base="https://${{ steps.deploy.outputs.project }}.deno.dev"; fi
           ok_codes="200 301 302 304 308"
           # Retry a few times for transient deployctl/edge blips (occasionally returns 5xx/000 right after deploy).
@@ -1050,7 +1072,8 @@ jobs:
         run: |
           mode='${{ steps.deploy.outputs.mode }}'
           project='${{ steps.deploy.outputs.project }}'
-          deno_url="${{ steps.deployed_url.outputs.deno_url || '' }}"
+          deployment_url="${{ steps.deployed_url.outputs.deployment_url || '' }}"
+          project_url="${{ steps.deployed_url.outputs.project_url || '' }}"
           router_url="${{ steps.deployed_url.outputs.router_url || '' }}"
           http="${{ steps.verify.outputs.http_code || '' }}"
           status="${{ steps.verify.outputs.status || '' }}"
@@ -1060,7 +1083,8 @@ jobs:
             echo "- Mode: ${mode:-unknown}"
             echo "- Project: ${project}"
             if [ -n "$router_url" ]; then echo "- Router URL: ${router_url}"; fi
-            if [ -n "$deno_url" ]; then echo "- Deno URL: ${deno_url}"; fi
+            if [ -n "$deployment_url" ]; then echo "- Deployment URL: ${deployment_url}"; fi
+            if [ -n "$project_url" ]; then echo "- Project URL: ${project_url}"; fi
             if [ -n "$http" ]; then
               echo "- HTTP: ${http} (${status})"
             fi
@@ -1072,7 +1096,7 @@ jobs:
         run: |
           status='${{ steps.verify.outputs.status || '' }}'
           http='${{ steps.verify.outputs.http_code || '' }}'
-          url='${{ steps.deployed_url.outputs.deno_url || '' }}'
+          url='${{ steps.deployed_url.outputs.deployment_url || '' }}'
           if [ "$status" != "ok" ]; then
             echo "::error::Deployment probe failed with HTTP ${http:-unknown} at ${url:-<missing url>}"
             exit 1
