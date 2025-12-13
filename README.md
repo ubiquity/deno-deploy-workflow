@@ -14,7 +14,7 @@ This repository provides a standardized, reusable Deno Deploy workflow at `.gith
 - Runtime env var forwarding (preferred over env_var_keys for simplicity).
 - Post-deploy URL verification and HTTP probing, auto-extracting asset paths from your built `index.html` so hashed bundles are probed without manual lists (index file is auto-discovered; override with `index_html_path` only if needed).
 - Preflight checks for required secrets (skips deploy if missing).
-- On `pull_request` runs, posts/updates a PR comment with preview deployment URLs (disable with `comment_pr: false`).
+- On `push`/`pull_request` runs, posts/updates a PR comment with preview deployment URLs when the commit is associated with an open PR (disable with `comment_pr: false`; requires `issues: write`, and for `push` runs also `pull-requests: read`).
 
 ## How to use (standardized template)
 
@@ -29,10 +29,13 @@ on:
 
 jobs:
   deploy:
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
     uses: ubiquity/deno-deploy-workflow/.github/workflows/deno-deploy-reusable.yml@main
     with:
       project: <subdomain>-ubq-fi
-      preview_project: <subdomain>-ubq-fi-preview
       entrypoint: serve.ts
       prod_branch: development
       # Add build-specific inputs as needed (bun_version, node_version, install_command, build_command, include, runtime_env, build_env)
