@@ -690,10 +690,10 @@ jobs:
             "--token=$DENO_DEPLOY_TOKEN"
           )
 
-          if [ "$mode" = "production" ]; then
+          # Use `--prod` for both production and preview targets so the stable
+          # project URL (<project>.deno.dev) always points at the latest deploy.
+          if [ "$mode" = "production" ] || [ "$mode" = "preview" ]; then
             flags+=("--prod")
-          elif [ "$CREATE_PREVIEW" = "true" ]; then
-            flags+=("--create")
           fi
 
           # Always include entrypoint and deno.json so deployctl finds the server.
@@ -836,7 +836,6 @@ jobs:
           MODE: ${{ steps.deploy.outputs.mode }}
           DEPLOYMENT_URL: ${{ steps.deployed_url.outputs.deployment_url || format('https://{0}.deno.dev', steps.deploy.outputs.project) }}
           PROJECT_URL: ${{ steps.deployed_url.outputs.project_url || format('https://{0}.deno.dev', steps.deploy.outputs.project) }}
-          ROUTER_URL: ${{ steps.deployed_url.outputs.router_url || '' }}
         run: |
           set -euo pipefail
           marker="<!-- deno-deploy-preview -->"
@@ -844,16 +843,10 @@ jobs:
           sha="${SHA}"
           deployment_url="${DEPLOYMENT_URL:-}"
           project_url="${PROJECT_URL:-}"
-          router_url="${ROUTER_URL:-}"
           if [ -z "$deployment_url" ]; then
             deployment_url="$project_url"
           fi
           url_line="<${deployment_url}>"
-          if [ -n "$router_url" ] && [ "$router_url" != "$deployment_url" ]; then
-            url_line="<${deployment_url}> (router: <${router_url}>)"
-          elif [ -n "$project_url" ] && [ "$project_url" != "$deployment_url" ]; then
-            url_line="<${deployment_url}> (project: <${project_url}>)"
-          fi
           timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           run_url="${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}"
 
@@ -960,6 +953,13 @@ jobs:
           timestamp = os.environ.get("TIMESTAMP", "")
           run_url = os.environ.get("RUN_URL", "")
 
+          def strip_router(val: str) -> str:
+              if not isinstance(val, str):
+                  return ""
+              return re.sub(r"\\s*\\(router: <[^>]+>\\)", "", val).strip()
+
+          url_line = strip_router(url_line)
+
           body = os.environ.get("EXISTING_BODY", "") or ""
           if "\\n" in body and "\n" not in body:
               body = body.replace("\\n", "\n")
@@ -990,6 +990,14 @@ jobs:
           if not isinstance(projects, dict):
               projects = {}
 
+          for _, history in list(projects.items()):
+              if not isinstance(history, list):
+                  continue
+              for entry in history:
+                  if not isinstance(entry, dict):
+                      continue
+                  entry["url_line"] = strip_router(entry.get("url_line") or "")
+
           if not has_data and marker in body:
               legacy_entries = {}
               for line in body.splitlines():
@@ -1008,7 +1016,7 @@ jobs:
                   if not line:
                       continue
                   projects.setdefault(p, []).append(
-                      {"ts": "", "sha": legacy_sha, "mode": legacy_mode, "url_line": line, "run_url": ""}
+                      {"ts": "", "sha": legacy_sha, "mode": legacy_mode, "url_line": strip_router(line), "run_url": ""}
                   )
 
           if project and url_line:
