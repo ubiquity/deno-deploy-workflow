@@ -537,7 +537,7 @@ jobs:
 
           tmp_out="$(mktemp)"
           python - <<'PY' > "$tmp_out"
-          import json, os, re, sys
+          import json, os, re
 
           raw = os.environ.get("ALL_SECRETS_JSON", "") or "{}"
           try:
@@ -567,7 +567,7 @@ jobs:
                   continue
               lines.append(f"{k}={v}")
 
-          sys.stdout.write("\n".join(lines))
+          print("\n".join(lines), end="")
           PY
 
           extra_runtime="$(cat "$tmp_out")"
