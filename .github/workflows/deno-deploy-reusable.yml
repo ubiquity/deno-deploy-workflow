@@ -554,6 +554,8 @@ jobs:
               v = str(v)
               if not v:
                   continue
+              if "\n" in v or "\r" in v:
+                  continue
               lines.append(f"{k}={v}")
 
           sys.stdout.write("\n".join(lines))
@@ -819,19 +821,19 @@ jobs:
           proj_resp="$(curl -sS -H "Authorization: Bearer $DENO_DEPLOY_TOKEN" "${api}/projects?name=${project}" || true)"
           project_id="$(
             RESP="$proj_resp" cat <<'PY' | sed 's/^  //' | python -
-              import json, os, sys
-              resp = os.environ.get("RESP", "")
-              pid = ""
-              try:
-                  data = json.loads(resp or "{}")
-                  projects = data.get("projects") or data.get("items") or []
-                  if isinstance(projects, list) and projects:
-                      first = projects[0] or {}
-                      if isinstance(first, dict):
-                          pid = first.get("id") or first.get("projectId") or ""
-              except Exception:
-                  pid = ""
-              print(pid, end="")
+            import json, os, sys
+            resp = os.environ.get("RESP", "")
+            pid = ""
+            try:
+                data = json.loads(resp or "{}")
+                projects = data.get("projects") or data.get("items") or []
+                if isinstance(projects, list) and projects:
+                    first = projects[0] or {}
+                    if isinstance(first, dict):
+                        pid = first.get("id") or first.get("projectId") or ""
+            except Exception:
+                pid = ""
+            print(pid, end="")
           PY
           )"
 
@@ -839,19 +841,19 @@ jobs:
             dep_resp="$(curl -sS -H "Authorization: Bearer $DENO_DEPLOY_TOKEN" "${api}/projects/${project_id}/deployments?commitSha=${sha}&limit=1" || true)"
             dep_url="$(
               RESP="$dep_resp" cat <<'PY' | sed 's/^  //' | python -
-                import json, os
-                resp = os.environ.get("RESP", "")
-                url = ""
-                try:
-                    data = json.loads(resp or "{}")
-                    deployments = data.get("deployments") or data.get("items") or []
-                    if isinstance(deployments, list) and deployments:
-                        first = deployments[0] or {}
-                        if isinstance(first, dict):
-                            url = first.get("url") or ""
-                except Exception:
-                    url = ""
-                print(url, end="")
+              import json, os
+              resp = os.environ.get("RESP", "")
+              url = ""
+              try:
+                  data = json.loads(resp or "{}")
+                  deployments = data.get("deployments") or data.get("items") or []
+                  if isinstance(deployments, list) and deployments:
+                      first = deployments[0] or {}
+                      if isinstance(first, dict):
+                          url = first.get("url") or ""
+              except Exception:
+                  url = ""
+              print(url, end="")
           PY
             )"
             if [ -n "$dep_url" ]; then
@@ -864,68 +866,68 @@ jobs:
 
           existing_id="$(
             COMMENTS="$comments" MARKER="$marker" cat <<'PY' | sed 's/^  //' | python -
-              import json, os, sys
-              comments = json.loads(os.environ.get("COMMENTS", "[]") or "[]")
-              marker = os.environ.get("MARKER", "")
-              for c in comments:
-                  body = (c or {}).get("body") or ""
-                  if marker and marker in body:
-                      print((c or {}).get("id") or "", end="")
-                      sys.exit(0)
-              print("", end="")
+            import json, os, sys
+            comments = json.loads(os.environ.get("COMMENTS", "[]") or "[]")
+            marker = os.environ.get("MARKER", "")
+            for c in comments:
+                body = (c or {}).get("body") or ""
+                if marker and marker in body:
+                    print((c or {}).get("id") or "", end="")
+                    sys.exit(0)
+            print("", end="")
           PY
           )"
 
           existing_body="$(
             COMMENTS="$comments" ID="$existing_id" cat <<'PY' | sed 's/^  //' | python -
-              import json, os
-              comments = json.loads(os.environ.get("COMMENTS", "[]") or "[]")
-              cid = os.environ.get("ID", "")
-              body = ""
-              for c in comments:
-                  if str((c or {}).get("id")) == str(cid):
-                      body = (c or {}).get("body") or ""
-                      break
-              print(body, end="")
+            import json, os
+            comments = json.loads(os.environ.get("COMMENTS", "[]") or "[]")
+            cid = os.environ.get("ID", "")
+            body = ""
+            for c in comments:
+                if str((c or {}).get("id")) == str(cid):
+                    body = (c or {}).get("body") or ""
+                    break
+            print(body, end="")
           PY
           )"
 
           new_body="$(
             EXISTING_BODY="$existing_body" MARKER="$marker" PROJECT="$project" URL="$url" SHA="$sha" MODE="$MODE" cat <<'PY' | sed 's/^  //' | python -
-              import os, re
+            import os, re
 
-              marker = os.environ.get("MARKER", "<!-- deno-deploy-preview -->")
-              project = os.environ.get("PROJECT", "")
-              url = os.environ.get("URL", "")
-              sha = os.environ.get("SHA", "")
-              mode = os.environ.get("MODE", "preview")
+            marker = os.environ.get("MARKER", "<!-- deno-deploy-preview -->")
+            project = os.environ.get("PROJECT", "")
+            url = os.environ.get("URL", "")
+            sha = os.environ.get("SHA", "")
+            mode = os.environ.get("MODE", "preview")
 
-              body = os.environ.get("EXISTING_BODY", "") or ""
-              entries = {}
-              if marker in body:
-                  for line in body.splitlines():
-                      m = re.match(r"-\s+`([^`]+)`:\s*(\S+)", line.strip())
-                      if m:
-                          entries[m.group(1)] = m.group(2)
+            body = os.environ.get("EXISTING_BODY", "") or ""
+            entries = {}
+            if marker in body:
+                for line in body.splitlines():
+                    m = re.match(r"-\s+`([^`]+)`:\s*(\S+)", line.strip())
+                    if m:
+                        entries[m.group(1)] = m.group(2)
 
-              if project and url:
-                  entries[project] = url
+            if project and url:
+                entries[project] = url
 
-              lines = [marker, "### Deno Deploy Previews", ""]
-              for p in sorted(entries.keys()):
-                  lines.append(f"- `{p}`: {entries[p]}")
-              lines.append("")
-              short_sha = sha[:7] if sha else ""
-              note = f"_Updated from `{short_sha}` ({mode})._" if short_sha else f"_Updated ({mode})._"
-              lines.append(note)
-              print("\n".join(lines), end="")
+            lines = [marker, "### Deno Deploy Previews", ""]
+            for p in sorted(entries.keys()):
+                lines.append(f"- `{p}`: {entries[p]}")
+            lines.append("")
+            short_sha = sha[:7] if sha else ""
+            note = f"_Updated from `{short_sha}` ({mode})._" if short_sha else f"_Updated ({mode})._"
+            lines.append(note)
+            print("\n".join(lines), end="")
           PY
           )"
 
           payload="$(
             BODY="$new_body" cat <<'PY' | sed 's/^  //' | python -
-              import json, os
-              print(json.dumps({"body": os.environ.get("BODY", "")}))
+            import json, os
+            print(json.dumps({"body": os.environ.get("BODY", "")}))
           PY
           )"
 
@@ -982,10 +984,13 @@ jobs:
           fi
           ok_codes="200 301 302 304 308"
           # Retry a few times for transient deployctl/edge blips (occasionally returns 5xx/000 right after deploy).
-          retryable_codes="000 429 500 502 503 504 599"
-          max_attempts=3
+          retryable_codes="000 404 429 500 502 503 504 599"
+          max_attempts=6
           misses=()
           summary=""
+
+          # Give the edge a moment to pick up the new deployment before probing assets.
+          sleep 10
 
           while IFS= read -r raw; do
             raw=$(echo "$raw" | tr -d '\r' | xargs)
