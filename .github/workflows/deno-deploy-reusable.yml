@@ -816,7 +816,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Comment deployment URL on PR
-        if: steps.preflight.outputs.deploy == 'yes' && env.COMMENT_PR == 'true' && steps.deploy.outputs.mode == 'preview' && (github.event_name == 'pull_request' || github.event_name == 'push')
+        if: steps.preflight.outputs.deploy == 'yes' && env.COMMENT_PR == 'true' && steps.deploy.outputs.mode == 'preview' && (github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -833,14 +833,14 @@ jobs:
           set -euo pipefail
           marker="<!-- deno-deploy-preview -->"
           project="${TARGET_PROJECT}"
-            sha="${SHA}"
-            deployment_url="${DEPLOYMENT_URL:-}"
-            project_url="${PROJECT_URL:-}"
-            router_url="${ROUTER_URL:-}"
-            if [ -z "$deployment_url" ]; then
-              deployment_url="$project_url"
-            fi
-            url_line="${deployment_url}"
+          sha="${SHA}"
+          deployment_url="${DEPLOYMENT_URL:-}"
+          project_url="${PROJECT_URL:-}"
+          router_url="${ROUTER_URL:-}"
+          if [ -z "$deployment_url" ]; then
+            deployment_url="$project_url"
+          fi
+          url_line="${deployment_url}"
           if [ -n "$router_url" ] && [ "$router_url" != "$deployment_url" ]; then
             url_line="${deployment_url} (router: ${router_url})"
           elif [ -n "$project_url" ] && [ "$project_url" != "$deployment_url" ]; then
@@ -848,9 +848,15 @@ jobs:
           fi
 
           pr_number="${PR_NUMBER:-}"
-          if [ -z "$pr_number" ] && [ "${EVENT_NAME:-}" = "push" ]; then
+          if [ -z "$pr_number" ]; then
             pulls_url="https://api.github.com/repos/${REPO}/commits/${sha}/pulls"
-            pulls_json="$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "$pulls_url" || true)"
+            pulls_resp="$(mktemp)"
+            pulls_code="$(curl -sS -o "$pulls_resp" -w "%{http_code}" -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "$pulls_url" || echo "000")"
+            pulls_json="$(cat "$pulls_resp" || true)"
+            rm -f "$pulls_resp"
+            if [ "$pulls_code" != "200" ]; then
+              echo "::warning::Failed to resolve PR via $pulls_url (HTTP $pulls_code)"
+            fi
             pr_number="$(
               PULLS_JSON="$pulls_json" python - <<'PY'
           import json, os
@@ -879,7 +885,14 @@ jobs:
           fi
 
           comments_url="https://api.github.com/repos/${REPO}/issues/${pr_number}/comments"
-          comments="$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$comments_url" || echo "[]")"
+          comments_resp="$(mktemp)"
+          comments_code="$(curl -sS -o "$comments_resp" -w "%{http_code}" -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "$comments_url" || echo "000")"
+          comments="$(cat "$comments_resp" || echo "[]")"
+          rm -f "$comments_resp"
+          if [ "$comments_code" -lt 200 ] || [ "$comments_code" -ge 300 ]; then
+            echo "::warning::Failed to list PR comments (HTTP $comments_code) for $comments_url"
+            comments="[]"
+          fi
 
           existing_id="$(
             COMMENTS="$comments" MARKER="$marker" python - <<'PY'
@@ -964,21 +977,52 @@ jobs:
           PY
           )"
 
+          tmp_resp="$(mktemp)"
+          http_code="000"
           if [ -n "$existing_id" ]; then
-            curl -sS -X PATCH \
+            http_code="$(curl -sS -o "$tmp_resp" -w "%{http_code}" -X PATCH \
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
               "https://api.github.com/repos/${REPO}/issues/comments/${existing_id}" \
-              -d "$payload" >/dev/null
-            echo "Updated PR comment ${existing_id} with ${project} -> ${url_line}"
+              -d "$payload" || echo "000")"
+            if [ "$http_code" != "200" ]; then
+              echo "::error::Failed to update PR comment ${existing_id} (HTTP $http_code)"
+              cat "$tmp_resp" || true
+              rm -f "$tmp_resp"
+              exit 1
+            fi
+            echo "Updated PR comment ${existing_id} with ${project} -> ${url_line} (HTTP $http_code)"
           else
-            curl -sS -X POST \
+            http_code="$(curl -sS -o "$tmp_resp" -w "%{http_code}" -X POST \
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
               "$comments_url" \
-              -d "$payload" >/dev/null
-            echo "Created PR comment for ${project} -> ${url_line}"
+              -d "$payload" || echo "000")"
+            if [ "$http_code" != "201" ]; then
+              echo "::error::Failed to create PR comment (HTTP $http_code)"
+              cat "$tmp_resp" || true
+              rm -f "$tmp_resp"
+              exit 1
+            fi
+            new_id="$(
+              RESP_FILE="$tmp_resp" python - <<'PY'
+          import json, os
+
+          path = os.environ.get("RESP_FILE", "")
+          try:
+              with open(path, "r", encoding="utf-8") as f:
+                  data = json.load(f)
+          except Exception:
+              data = {}
+
+          print(str((data or {}).get("id") or ""), end="")
+          PY
+            )"
+            echo "Created PR comment ${new_id:-<unknown>} for ${project} -> ${url_line} (HTTP $http_code)"
           fi
+          rm -f "$tmp_resp"
 
       - name: Verify deployment
         if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true'
