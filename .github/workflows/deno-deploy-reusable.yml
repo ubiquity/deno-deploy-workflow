@@ -774,7 +774,7 @@ jobs:
 
           url = os.environ.get("URL", "")
           target = os.environ.get("TARGET", "")
-          m = re.match(rf"^https://{re.escape(target)}-([A-Za-z0-9]+)\\.deno\\.dev$", url)
+          m = re.match(rf"^https://{re.escape(target)}-([A-Za-z0-9]+)\.deno\.dev$", url)
           print(m.group(1) if m else "", end="")
           PY
               )"
