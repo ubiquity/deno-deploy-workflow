@@ -175,9 +175,15 @@ on:
         required: false
       OPENAI_API_KEY:
         required: false
+      CODEX_AUTH_JSON_B64:
+        required: false
+      CODEX_INSTRUCTIONS_B64:
+        required: false
       UBQ_AI_AUTH_TOKENS:
         required: false
       OPENAI_BASE_URL:
+        required: false
+      CODEX_BASE_URL:
         required: false
       CORS_ALLOW_ORIGIN:
         required: false
@@ -237,8 +243,11 @@ jobs:
       SUPABASE_SERVICE_ROLE_KEY: ${{ vars.SUPABASE_SERVICE_ROLE_KEY || secrets.SUPABASE_SERVICE_ROLE_KEY || '' }}
       # Optional AI gateway/proxy env (only forwarded when requested via env_var_keys/runtime_env)
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY || vars.OPENAI_API_KEY || '' }}
+      CODEX_AUTH_JSON_B64: ${{ secrets.CODEX_AUTH_JSON_B64 || vars.CODEX_AUTH_JSON_B64 || '' }}
+      CODEX_INSTRUCTIONS_B64: ${{ secrets.CODEX_INSTRUCTIONS_B64 || vars.CODEX_INSTRUCTIONS_B64 || '' }}
       UBQ_AI_AUTH_TOKENS: ${{ secrets.UBQ_AI_AUTH_TOKENS || vars.UBQ_AI_AUTH_TOKENS || '' }}
       OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || secrets.OPENAI_BASE_URL || '' }}
+      CODEX_BASE_URL: ${{ vars.CODEX_BASE_URL || secrets.CODEX_BASE_URL || '' }}
       CORS_ALLOW_ORIGIN: ${{ vars.CORS_ALLOW_ORIGIN || secrets.CORS_ALLOW_ORIGIN || '' }}
       NPM_CONFIG_REGISTRY: https://registry.npmjs.org
 
