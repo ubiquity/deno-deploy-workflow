@@ -72,12 +72,12 @@ on:
           .next
           .vercel
       env_var_keys:
-        description: Newline-separated env var names to forward as --env-var
+        description: Newline-separated env var names to forward as --env
         required: false
         type: string
         default: ""
       runtime_env:
-        description: Newline-separated KEY=VALUE lines to forward as --env-var (preferred)
+        description: Newline-separated KEY=VALUE lines to forward as --env (preferred)
         required: false
         type: string
         default: ""
@@ -732,7 +732,7 @@ jobs:
             [ -z "$key" ] && continue
             val="${!key:-}"
             if [ -n "$val" ]; then
-              flags+=("--env-var=${key}=${val}")
+              flags+=("--env=${key}=${val}")
             else
               echo "::warning::Requested env $key for deploy but it is empty"
             fi
@@ -745,7 +745,7 @@ jobs:
               echo "::warning::runtime_env line missing '=': $line"
               continue
             fi
-            flags+=("--env-var=$line")
+            flags+=("--env=$line")
           done <<< "$RUNTIME_ENV"
 
           attempt=1
