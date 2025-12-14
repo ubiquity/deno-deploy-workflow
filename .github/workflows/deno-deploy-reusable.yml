@@ -702,6 +702,9 @@ jobs:
             "--root=$ROOT_DIR"
             "--token=$DENO_DEPLOY_TOKEN"
           )
+          if [ "$mode" = "production" ]; then
+            deploy_flags+=("--prod")
+          fi
 
           # Always include entrypoint and deno.json so deployctl finds the server.
           deploy_flags+=("--include=$ENTRYPOINT")
@@ -747,12 +750,7 @@ jobs:
           start_time=$(date +%s)
           # Leave a small buffer so verify/summary steps can complete before hitting the 6h Actions limit.
           max_seconds=$(( 6 * 60 * 60 - 300 ))
-          # Deploy first (preview deployment) with env vars; then promote to production so
-          # the stable project URL (<project>.deno.dev) + custom domains point at the latest build.
-          # This avoids a deployctl 1.12.0 edge case where `deployctl deploy --env ... --prod`
-          # may leave the project without a production deployment.
-          preview_url=""
-          preview_id=""
+          deployment_url=""
           while true; do
             set +e
             output=$(deployctl deploy "${deploy_flags[@]}" 2>&1)
@@ -760,24 +758,13 @@ jobs:
             set -e
             if [ $status -eq 0 ]; then
               echo "$output"
-              preview_url="$(printf '%s\n' "$output" | grep -oE "https://${target}-[A-Za-z0-9]+\\.deno\\.dev" | head -n 1 || true)"
-              if [ -z "$preview_url" ]; then
-                preview_url="$(printf '%s\n' "$output" | grep -oE "https://${target}\\.deno\\.dev" | head -n 1 || true)"
+              deployment_url="$(printf '%s\n' "$output" | grep -oE "https://${target}-[A-Za-z0-9]+\\.deno\\.dev" | head -n 1 || true)"
+              if [ -z "$deployment_url" ]; then
+                deployment_url="$(printf '%s\n' "$output" | grep -oE "https://${target}\\.deno\\.dev" | head -n 1 || true)"
               fi
-              if [ -z "$preview_url" ]; then
-                preview_url="https://${target}.deno.dev"
+              if [ -z "$deployment_url" ]; then
+                deployment_url="https://${target}.deno.dev"
               fi
-
-              preview_id="$(
-                URL="$preview_url" TARGET="$target" python - <<'PY'
-          import os, re
-
-          url = os.environ.get("URL", "")
-          target = os.environ.get("TARGET", "")
-          m = re.match(rf"^https://{re.escape(target)}-([A-Za-z0-9]+)\.deno\.dev$", url)
-          print(m.group(1) if m else "", end="")
-          PY
-              )"
               break
             fi
             if echo "$output" | grep -q "Too many deployments created per hour"; then
@@ -802,43 +789,8 @@ jobs:
             exit $status
           done
 
-          deployment_url="$preview_url"
-
-          if [ -z "$preview_id" ]; then
-            echo "::warning::Could not parse deployment id from deployctl output; stable project URL may not update."
-          else
-            promote_attempt=1
-            while true; do
-              set +e
-              promote_out="$(deployctl deployments redeploy --id="$preview_id" --prod --token="$DENO_DEPLOY_TOKEN" 2>&1)"
-              promote_status=$?
-              set -e
-              if [ $promote_status -eq 0 ]; then
-                echo "$promote_out"
-                deployment_url="https://${target}.deno.dev"
-                break
-              fi
-              if echo "$promote_out" | grep -q "Too many deployments created per hour"; then
-                now=$(date +%s)
-                elapsed=$(( now - start_time ))
-                remaining=$(( max_seconds - elapsed ))
-                if [ $remaining -le 0 ]; then
-                  echo "::error::Deno Deploy rate limit persisted for ~${elapsed}s; exhausted retry window (6h budget)"
-                  echo "$promote_out"
-                  exit 1
-                fi
-                sleep_for=$poll_sleep
-                if [ $sleep_for -gt $remaining ]; then
-                  sleep_for=$remaining
-                fi
-                echo "::warning::Deno Deploy rate limit (promotion attempt ${promote_attempt}); sleeping ${sleep_for}s (elapsed ${elapsed}s, remaining ${remaining}s)"
-                sleep "$sleep_for"
-                promote_attempt=$(( promote_attempt + 1 ))
-                continue
-              fi
-              echo "$promote_out"
-              exit $promote_status
-            done
+          if [ "$mode" = "production" ]; then
+            deployment_url="https://${target}.deno.dev"
           fi
 
           {
