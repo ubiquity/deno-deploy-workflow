@@ -181,6 +181,8 @@ on:
         required: false
       UBQ_AI_AUTH_TOKENS:
         required: false
+      UBQ_AI_ADMIN_TOKENS:
+        required: false
       OPENAI_BASE_URL:
         required: false
       CODEX_BASE_URL:
@@ -246,6 +248,7 @@ jobs:
       CODEX_AUTH_JSON_B64: ${{ secrets.CODEX_AUTH_JSON_B64 || vars.CODEX_AUTH_JSON_B64 || '' }}
       CODEX_INSTRUCTIONS_B64: ${{ secrets.CODEX_INSTRUCTIONS_B64 || vars.CODEX_INSTRUCTIONS_B64 || '' }}
       UBQ_AI_AUTH_TOKENS: ${{ secrets.UBQ_AI_AUTH_TOKENS || vars.UBQ_AI_AUTH_TOKENS || '' }}
+      UBQ_AI_ADMIN_TOKENS: ${{ secrets.UBQ_AI_ADMIN_TOKENS || vars.UBQ_AI_ADMIN_TOKENS || '' }}
       OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || secrets.OPENAI_BASE_URL || '' }}
       CODEX_BASE_URL: ${{ vars.CODEX_BASE_URL || secrets.CODEX_BASE_URL || '' }}
       CORS_ALLOW_ORIGIN: ${{ vars.CORS_ALLOW_ORIGIN || secrets.CORS_ALLOW_ORIGIN || '' }}
