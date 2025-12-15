@@ -179,9 +179,9 @@ on:
         required: false
       CODEX_INSTRUCTIONS_B64:
         required: false
-      UBQ_AI_AUTH_TOKENS:
+      UBIQUITY_AI_USER_TOKEN:
         required: false
-      UBQ_AI_ADMIN_TOKENS:
+      UBIQUITY_AI_ADMIN_TOKEN:
         required: false
       OPENAI_BASE_URL:
         required: false
@@ -247,8 +247,8 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY || vars.OPENAI_API_KEY || '' }}
       CODEX_AUTH_JSON_B64: ${{ secrets.CODEX_AUTH_JSON_B64 || vars.CODEX_AUTH_JSON_B64 || '' }}
       CODEX_INSTRUCTIONS_B64: ${{ secrets.CODEX_INSTRUCTIONS_B64 || vars.CODEX_INSTRUCTIONS_B64 || '' }}
-      UBQ_AI_AUTH_TOKENS: ${{ secrets.UBQ_AI_AUTH_TOKENS || vars.UBQ_AI_AUTH_TOKENS || '' }}
-      UBQ_AI_ADMIN_TOKENS: ${{ secrets.UBQ_AI_ADMIN_TOKENS || vars.UBQ_AI_ADMIN_TOKENS || '' }}
+      UBIQUITY_AI_USER_TOKEN: ${{ secrets.UBIQUITY_AI_USER_TOKEN || vars.UBIQUITY_AI_USER_TOKEN || '' }}
+      UBIQUITY_AI_ADMIN_TOKEN: ${{ secrets.UBIQUITY_AI_ADMIN_TOKEN || vars.UBIQUITY_AI_ADMIN_TOKEN || '' }}
       OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || secrets.OPENAI_BASE_URL || '' }}
       CODEX_BASE_URL: ${{ vars.CODEX_BASE_URL || secrets.CODEX_BASE_URL || '' }}
       CORS_ALLOW_ORIGIN: ${{ vars.CORS_ALLOW_ORIGIN || secrets.CORS_ALLOW_ORIGIN || '' }}
