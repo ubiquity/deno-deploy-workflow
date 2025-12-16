@@ -875,7 +875,7 @@ jobs:
           if [ -z "$deployment_url" ]; then
             deployment_url="$project_url"
           fi
-          url_line="<${deployment_url}>"
+          url_line="${deployment_url}"
           timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           run_url="${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}"
 
@@ -971,9 +971,11 @@ jobs:
           )"
 
           new_body="$(
-            EXISTING_BODY="$existing_body" MARKER="$marker" PROJECT="$project" URL_LINE="$url_line" SHA="$sha" MODE="$MODE" TIMESTAMP="$timestamp" RUN_URL="$run_url" python - <<'PY'
+            EXISTING_BODY="$existing_body" MARKER="$marker" PROJECT="$project" URL_LINE="$url_line" SHA="$sha" MODE="$MODE" TIMESTAMP="$timestamp" RUN_URL="$run_url" REPO="$REPO" PR_NUMBER="$pr_number" python - <<'PY'
           import json, os, re
-          
+          from datetime import datetime, timezone
+          from html import escape
+
           marker = os.environ.get("MARKER", "<!-- deno-deploy-preview -->")
           project = os.environ.get("PROJECT", "")
           url_line = os.environ.get("URL_LINE", "")
@@ -981,18 +983,25 @@ jobs:
           mode = os.environ.get("MODE", "preview")
           timestamp = os.environ.get("TIMESTAMP", "")
           run_url = os.environ.get("RUN_URL", "")
+          repo = (os.environ.get("REPO", "") or "").strip()
+          pr_number = (os.environ.get("PR_NUMBER", "") or "").strip()
 
-          def strip_router(val: str) -> str:
+          MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+          def normalize_url(val: str) -> str:
               if not isinstance(val, str):
                   return ""
-              return re.sub(r"\s*\(router: <[^>]+>\)", "", val).strip()
+              val = re.sub(r"\s*\(router: <[^>]+>\)", "", val).strip()
+              if val.startswith("<") and val.endswith(">"):
+                  val = val[1:-1].strip()
+              return val
 
-          url_line = strip_router(url_line)
+          url_line = normalize_url(url_line)
 
           body = os.environ.get("EXISTING_BODY", "") or ""
           if "\\n" in body and "\n" not in body:
               body = body.replace("\\n", "\n")
-          
+
           data_prefix = "<!-- deno-deploy-preview:data "
           data_json = ""
           has_data = False
@@ -1025,7 +1034,7 @@ jobs:
               for entry in history:
                   if not isinstance(entry, dict):
                       continue
-                  entry["url_line"] = strip_router(entry.get("url_line") or "")
+                  entry["url_line"] = normalize_url(entry.get("url_line") or "")
 
           if not has_data and marker in body:
               legacy_entries = {}
@@ -1045,7 +1054,7 @@ jobs:
                   if not line:
                       continue
                   projects.setdefault(p, []).append(
-                      {"ts": "", "sha": legacy_sha, "mode": legacy_mode, "url_line": strip_router(line), "run_url": ""}
+                      {"ts": "", "sha": legacy_sha, "mode": legacy_mode, "url_line": normalize_url(line), "run_url": ""}
                   )
 
           if project and url_line:
@@ -1064,49 +1073,87 @@ jobs:
                       }
                   )
 
+          def format_utc(ts: str) -> str:
+              if not ts:
+                  return ""
+              dt = None
+              try:
+                  if ts.endswith("Z"):
+                      dt = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                  else:
+                      dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+              except Exception:
+                  dt = None
+              if not dt:
+                  return ""
+              if dt.tzinfo is None:
+                  dt = dt.replace(tzinfo=timezone.utc)
+              dt = dt.astimezone(timezone.utc)
+              month = MONTHS[dt.month - 1] if 1 <= dt.month <= 12 else dt.strftime("%b")
+              return f"{dt.day:02d} {month} {dt.hour:02d}:{dt.minute:02d}"
+
           def render(pdata: dict, truncated: bool) -> str:
               payload = {"version": 1, "projects": pdata}
               data_line = "<!-- deno-deploy-preview:data " + json.dumps(
                   payload, separators=(",", ":"), sort_keys=True
               ) + " -->"
 
-              lines = [marker, data_line, "### Deno Deploy Previews", ""]
-              for p in sorted(pdata.keys()):
-                  lines.append(f"- `{p}`")
+              lines = [marker, data_line, '<div align="right">', ""]
+
+              projects_sorted = sorted(pdata.keys())
+              multi_project = len(projects_sorted) > 1
+
+              for p in projects_sorted:
                   history = pdata.get(p) or []
-                  if isinstance(history, list):
-                      for entry in reversed(history):
-                          entry = entry or {}
-                          ts = entry.get("ts") or ""
-                          sha_val = entry.get("sha") or ""
-                          sha_short = sha_val[:7] if sha_val else ""
-                          mode_val = entry.get("mode") or ""
-                          url_val = entry.get("url_line") or ""
-                          run_val = entry.get("run_url") or ""
+                  if not isinstance(history, list) or not history:
+                      continue
 
-                          prefix_bits = []
-                          if ts:
-                              prefix_bits.append(ts)
-                          if sha_short:
-                              prefix_bits.append(f"`{sha_short}`")
-                          if mode_val:
-                              prefix_bits.append(f"({mode_val})")
-                          prefix = " ".join(prefix_bits).strip()
+                  if multi_project:
+                      lines.append(f"<code>{escape(str(p))}</code><br />")
 
-                          line = f"  - {prefix}: {url_val}" if prefix else f"  - {url_val}"
-                          if run_val:
-                              if not (run_val.startswith("<") and run_val.endswith(">")):
-                                  run_val = f"<{run_val}>"
-                              line += f" (run: {run_val})"
-                          lines.append(line)
-                  lines.append("")
+                  for entry in reversed(history):
+                      entry = entry or {}
+                      ts = (entry.get("ts") or "").strip()
+                      sha_val = (entry.get("sha") or "").strip()
+                      sha_short = sha_val[:7] if sha_val else ""
+                      url_val = normalize_url((entry.get("url_line") or "").strip())
+                      run_val = (entry.get("run_url") or "").strip()
 
-              while lines and lines[-1] == "":
-                  lines.pop()
+                      bits = []
+                      if run_val:
+                          bits.append(f'<a href="{escape(run_val, quote=True)}"> ⛭ </a>')
+                      else:
+                          bits.append(" ⛭ ")
+
+                      if sha_val:
+                          commit_href = f"commits/{sha_val}"
+                          if repo and pr_number:
+                              commit_href = f"/{repo}/pull/{pr_number}/commits/{sha_val}"
+                          bits.append(
+                              f'<a href="{escape(commit_href, quote=True)}">{escape(sha_short)}</a>'
+                          )
+                      elif sha_short:
+                          bits.append(escape(sha_short))
+
+                      utc = format_utc(ts)
+                      if utc:
+                          bits.append(escape(utc))
+
+                      if url_val:
+                          bits.append(f'<a href="{escape(url_val, quote=True)}"> ⎘ </a>')
+
+                      line = " ".join([b for b in bits if b]).strip()
+                      if line:
+                          lines.append(f"<code>{line}</code><br />")
+
+                  if multi_project:
+                      lines.append("<br />")
+
               if truncated:
-                  lines.append("")
-                  lines.append("_History truncated to fit GitHub comment size limits._")
-              return "\n".join(lines)
+                  lines.append("<sub>History truncated to fit GitHub comment size limits.</sub>")
+
+              lines.append("</div>")
+              return "\n".join(lines).strip()
 
           MAX_BODY_CHARS = 60000
           truncated = False
