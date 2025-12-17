@@ -1111,7 +1111,7 @@ jobs:
                   if multi_project:
                       lines.append(f"<code>{escape(str(p))}</code><br />")
 
-                  for entry in reversed(history):
+                  for i, entry in enumerate(reversed(history)):
                       entry = entry or {}
                       ts = (entry.get("ts") or "").strip()
                       sha_val = (entry.get("sha") or "").strip()
@@ -1144,7 +1144,9 @@ jobs:
 
                       line = " ".join([b for b in bits if b]).strip()
                       if line:
-                          lines.append(f"<code>{line}</code><br />")
+                          # Only add <br /> after the first (latest) deploy entry
+                          suffix = "<br />" if i == 0 else ""
+                          lines.append(f"<code>{line}</code>{suffix}")
 
                   if multi_project:
                       lines.append("<br />")
