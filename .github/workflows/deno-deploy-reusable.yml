@@ -972,7 +972,7 @@ jobs:
 
           new_body="$(
             EXISTING_BODY="$existing_body" MARKER="$marker" PROJECT="$project" URL_LINE="$url_line" SHA="$sha" MODE="$MODE" TIMESTAMP="$timestamp" RUN_URL="$run_url" REPO="$REPO" PR_NUMBER="$pr_number" python - <<'PY'
-          import json, os, re
+          import json, os, re, urllib.request
           from datetime import datetime, timezone
           from html import escape
 
@@ -987,6 +987,19 @@ jobs:
           pr_number = (os.environ.get("PR_NUMBER", "") or "").strip()
 
           MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+          MAX_SUBJECT_LEN = 140
+
+          def normalize_subject(val: str) -> str:
+              if not isinstance(val, str):
+                  return ""
+              val = val.replace("\r\n", "\n").replace("\r", "\n")
+              val = val.split("\n", 1)[0].strip()
+              val = re.sub(r"\s+", " ", val).strip()
+              if not val:
+                  return ""
+              if len(val) > MAX_SUBJECT_LEN:
+                  val = val[: MAX_SUBJECT_LEN - 1].rstrip() + "…"
+              return val
 
           def normalize_url(val: str) -> str:
               if not isinstance(val, str):
@@ -997,6 +1010,36 @@ jobs:
               return val
 
           url_line = normalize_url(url_line)
+
+          token = (os.environ.get("GH_TOKEN", "") or "").strip()
+          api_base = (
+              os.environ.get("GITHUB_API_URL", "https://api.github.com") or "https://api.github.com"
+          ).rstrip("/")
+          commit_subject_cache = {}
+
+          def fetch_commit_subject(sha_val: str) -> str:
+              sha_val = (sha_val or "").strip()
+              if not sha_val or not repo:
+                  return ""
+              cached = commit_subject_cache.get(sha_val)
+              if cached is not None:
+                  return cached
+              subject = ""
+              if token:
+                  try:
+                      req = urllib.request.Request(f"{api_base}/repos/{repo}/commits/{sha_val}")
+                      req.add_header("Accept", "application/vnd.github+json")
+                      req.add_header("X-GitHub-Api-Version", "2022-11-28")
+                      req.add_header("Authorization", f"Bearer {token}")
+                      with urllib.request.urlopen(req, timeout=10) as resp:
+                          raw = resp.read().decode("utf-8", errors="replace")
+                      data = json.loads(raw)
+                      message = ((data or {}).get("commit") or {}).get("message") or ""
+                      subject = normalize_subject(message)
+                  except Exception:
+                      subject = ""
+              commit_subject_cache[sha_val] = subject
+              return subject
 
           body = os.environ.get("EXISTING_BODY", "") or ""
           if "\\n" in body and "\n" not in body:
@@ -1035,6 +1078,7 @@ jobs:
                   if not isinstance(entry, dict):
                       continue
                   entry["url_line"] = normalize_url(entry.get("url_line") or "")
+                  entry["msg"] = normalize_subject(entry.get("msg") or entry.get("message") or "")
 
           if not has_data and marker in body:
               legacy_entries = {}
@@ -1054,7 +1098,14 @@ jobs:
                   if not line:
                       continue
                   projects.setdefault(p, []).append(
-                      {"ts": "", "sha": legacy_sha, "mode": legacy_mode, "url_line": normalize_url(line), "run_url": ""}
+                      {
+                          "ts": "",
+                          "sha": legacy_sha,
+                          "mode": legacy_mode,
+                          "url_line": normalize_url(line),
+                          "run_url": "",
+                          "msg": "",
+                      }
                   )
 
           if project and url_line:
@@ -1070,8 +1121,19 @@ jobs:
                           "mode": mode,
                           "url_line": url_line,
                           "run_url": run_url,
+                          "msg": "",
                       }
                   )
+
+          for _, history in list(projects.items()):
+              if not isinstance(history, list):
+                  continue
+              for entry in history:
+                  if not isinstance(entry, dict):
+                      continue
+                  sha_val = (entry.get("sha") or "").strip()
+                  if sha_val and not entry.get("msg"):
+                      entry["msg"] = fetch_commit_subject(sha_val)
 
           def format_utc(ts: str) -> str:
               if not ts:
@@ -1093,15 +1155,68 @@ jobs:
               return f"{dt.day:02d} {month} {dt.hour:02d}:{dt.minute:02d}"
 
           def render(pdata: dict, truncated: bool) -> str:
-              payload = {"version": 1, "projects": pdata}
+              payload = {"version": 2, "projects": pdata}
               data_line = "<!-- deno-deploy-preview:data " + json.dumps(
                   payload, separators=(",", ":"), sort_keys=True
               ) + " -->"
 
-              lines = [marker, data_line, '<div align="right">', ""]
+              lines = [marker, data_line]
 
               projects_sorted = sorted(pdata.keys())
               multi_project = len(projects_sorted) > 1
+
+              def row(entry: dict):
+                  entry = entry or {}
+                  ts = (entry.get("ts") or "").strip()
+                  sha_val = (entry.get("sha") or "").strip()
+                  sha_short = sha_val[:7] if sha_val else ""
+                  url_val = normalize_url((entry.get("url_line") or "").strip())
+                  run_val = (entry.get("run_url") or "").strip()
+                  msg_val = normalize_subject(entry.get("msg") or "")
+
+                  commit_href = f"commits/{sha_val}" if sha_val else ""
+                  if sha_val and repo and pr_number:
+                      commit_href = f"/{repo}/pull/{pr_number}/commits/{sha_val}"
+
+                  utc = format_utc(ts)
+
+                  # Prefer linking the timestamp to the workflow run (GitHub Actions).
+                  # Fall back to the deployment URL when the run URL isn't available (legacy history).
+                  timestamp_href = run_val or url_val
+
+                  row_lines = ["  <tr>"]
+                  row_lines.append(
+                      '    <td><code><a href="'
+                      + escape(timestamp_href, quote=True)
+                      + '"><span>'
+                      + escape(utc)
+                      + "</span></a></code></td>"
+                  )
+
+                  message_cell = ""
+                  if sha_val and commit_href:
+                      message_cell += (
+                          '<code><a href="'
+                          + escape(commit_href, quote=True)
+                          + '">'
+                          + escape(sha_short)
+                          + "</a></code>"
+                      )
+                  elif sha_short:
+                      message_cell += "<code>" + escape(sha_short) + "</code>"
+
+                  if msg_val and url_val:
+                      message_cell += (
+                          ' <span><a href="'
+                          + escape(url_val, quote=True)
+                          + '">'
+                          + escape(msg_val)
+                          + "</a></span>"
+                      )
+
+                  row_lines.append("    <td>" + message_cell + " </td>")
+                  row_lines.append("  </tr>")
+                  return row_lines
 
               for p in projects_sorted:
                   history = pdata.get(p) or []
@@ -1109,52 +1224,39 @@ jobs:
                       continue
 
                   if multi_project:
-                      lines.append(f"<code>{escape(str(p))}</code><br />")
+                      lines.append(f"<code>{escape(str(p))}</code>")
+                      lines.append("")
 
-                  for i, entry in enumerate(reversed(history)):
-                      entry = entry or {}
-                      ts = (entry.get("ts") or "").strip()
-                      sha_val = (entry.get("sha") or "").strip()
-                      sha_short = sha_val[:7] if sha_val else ""
-                      url_val = normalize_url((entry.get("url_line") or "").strip())
-                      run_val = (entry.get("run_url") or "").strip()
+                  # Render newest first.
+                  history_rev = list(reversed(history))
+                  latest = history_rev[0]
+                  previous = history_rev[1:]
 
-                      bits = []
-                      if run_val:
-                          bits.append(f'<a href="{escape(run_val, quote=True)}"> ⛭ </a>')
-                      else:
-                          bits.append(" ⛭ ")
+                  lines.append("<table>")
+                  lines.extend(row(latest))
+                  lines.append("</table>")
 
-                      if sha_val:
-                          commit_href = f"commits/{sha_val}"
-                          if repo and pr_number:
-                              commit_href = f"/{repo}/pull/{pr_number}/commits/{sha_val}"
-                          bits.append(
-                              f'<a href="{escape(commit_href, quote=True)}">{escape(sha_short)}</a>'
-                          )
-                      elif sha_short:
-                          bits.append(escape(sha_short))
+                  if previous:
+                      count = len(previous)
+                      plural = "deployments" if count != 1 else "deployment"
+                      lines.append("")
+                      lines.append("<details>")
+                      lines.append(f"<summary><strong>Show {count} previous {plural}</strong></summary>")
+                      lines.append("")
+                      lines.append("<table>")
+                      for idx, entry in enumerate(previous):
+                          lines.extend(row(entry))
+                          if idx != len(previous) - 1:
+                              lines.append("")
+                      lines.append("</table>")
+                      lines.append("")
+                      lines.append("</details>")
 
-                      utc = format_utc(ts)
-                      if utc:
-                          bits.append(escape(utc))
-
-                      if url_val:
-                          bits.append(f'<a href="{escape(url_val, quote=True)}"> ⎘ </a>')
-
-                      line = " ".join([b for b in bits if b]).strip()
-                      if line:
-                          # Only add <br /> after the first (latest) deploy entry
-                          suffix = "<br />" if i == 0 else ""
-                          lines.append(f"<code>{line}</code>{suffix}")
-
-                  if multi_project:
-                      lines.append("<br />")
+                  lines.append("")
 
               if truncated:
                   lines.append("<sub>History truncated to fit GitHub comment size limits.</sub>")
 
-              lines.append("</div>")
               return "\n".join(lines).strip()
 
           MAX_BODY_CHARS = 60000
