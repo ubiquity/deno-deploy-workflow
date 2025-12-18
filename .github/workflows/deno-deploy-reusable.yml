@@ -917,62 +917,12 @@ jobs:
           fi
 
           comments_url="https://api.github.com/repos/${REPO}/issues/${pr_number}/comments"
-          comments_resp="$(mktemp)"
-          comments_code="$(curl -sS -o "$comments_resp" -w "%{http_code}" -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "$comments_url" || echo "000")"
-          comments="$(cat "$comments_resp" || echo "[]")"
-          rm -f "$comments_resp"
-          if [ "$comments_code" -lt 200 ] || [ "$comments_code" -ge 300 ]; then
-            echo "::warning::Failed to list PR comments (HTTP $comments_code) for $comments_url"
-            comments="[]"
-          fi
 
+          body_path="$(mktemp)"
           existing_id="$(
-            COMMENTS="$comments" MARKER="$marker" python - <<'PY'
-          import json, os, sys
-
-          raw = os.environ.get("COMMENTS", "") or "[]"
-          marker = os.environ.get("MARKER", "")
-          try:
-              data = json.loads(raw)
-          except Exception:
-              data = []
-          if not isinstance(data, list):
-              data = []
-
-          for c in data:
-              body = (c or {}).get("body") or ""
-              if marker and marker in body:
-                  print((c or {}).get("id") or "", end="")
-                  sys.exit(0)
-          print("", end="")
-          PY
-          )"
-
-          existing_body="$(
-            COMMENTS="$comments" ID="$existing_id" python - <<'PY'
-          import json, os
-
-          raw = os.environ.get("COMMENTS", "") or "[]"
-          cid = os.environ.get("ID", "")
-          try:
-              data = json.loads(raw)
-          except Exception:
-              data = []
-          if not isinstance(data, list):
-              data = []
-
-          body = ""
-          for c in data:
-              if str((c or {}).get("id")) == str(cid):
-                  body = (c or {}).get("body") or ""
-                  break
-          print(body, end="")
-          PY
-          )"
-
-          new_body="$(
-            EXISTING_BODY="$existing_body" MARKER="$marker" PROJECT="$project" URL_LINE="$url_line" SHA="$sha" MODE="$MODE" TIMESTAMP="$timestamp" RUN_URL="$run_url" REPO="$REPO" PR_NUMBER="$pr_number" python - <<'PY'
-          import json, os, re, urllib.request
+            OUT_FILE="$body_path" MARKER="$marker" PROJECT="$project" URL_LINE="$url_line" SHA="$sha" MODE="$MODE" TIMESTAMP="$timestamp" RUN_URL="$run_url" REPO="$REPO" PR_NUMBER="$pr_number" python - <<'PY'
+          import json, os, re, sys, urllib.request
+          from urllib.error import HTTPError, URLError
           from datetime import datetime, timezone
           from html import escape
 
@@ -985,9 +935,12 @@ jobs:
           run_url = os.environ.get("RUN_URL", "")
           repo = (os.environ.get("REPO", "") or "").strip()
           pr_number = (os.environ.get("PR_NUMBER", "") or "").strip()
+          out_file = os.environ.get("OUT_FILE", "")
 
           MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
           MAX_SUBJECT_LEN = 140
+          COMMENTS_PER_PAGE = 100
+          MAX_COMMENT_PAGES = 20
 
           def normalize_subject(val: str) -> str:
               if not isinstance(val, str):
@@ -1017,6 +970,41 @@ jobs:
           ).rstrip("/")
           commit_subject_cache = {}
 
+          def api_get_json(url: str):
+              if not token:
+                  return None
+              try:
+                  req = urllib.request.Request(url)
+                  req.add_header("Accept", "application/vnd.github+json")
+                  req.add_header("X-GitHub-Api-Version", "2022-11-28")
+                  req.add_header("Authorization", f"Bearer {token}")
+                  with urllib.request.urlopen(req, timeout=15) as resp:
+                      raw = resp.read().decode("utf-8", errors="replace")
+                  return json.loads(raw)
+              except (HTTPError, URLError, TimeoutError) as e:
+                  print(f"::warning::GitHub API request failed for {url}: {e}", file=sys.stderr)
+                  return None
+              except Exception as e:
+                  print(f"::warning::GitHub API parse failed for {url}: {e}", file=sys.stderr)
+                  return None
+
+          def fetch_issue_comments() -> list:
+              if not token or not repo or not pr_number:
+                  return []
+              all_comments = []
+              for page in range(1, MAX_COMMENT_PAGES + 1):
+                  url = (
+                      f"{api_base}/repos/{repo}/issues/{pr_number}/comments"
+                      f"?per_page={COMMENTS_PER_PAGE}&page={page}"
+                  )
+                  data = api_get_json(url)
+                  if not isinstance(data, list):
+                      break
+                  all_comments.extend(data)
+                  if len(data) < COMMENTS_PER_PAGE:
+                      break
+              return all_comments
+
           def fetch_commit_subject(sha_val: str) -> str:
               sha_val = (sha_val or "").strip()
               if not sha_val or not repo:
@@ -1027,13 +1015,7 @@ jobs:
               subject = ""
               if token:
                   try:
-                      req = urllib.request.Request(f"{api_base}/repos/{repo}/commits/{sha_val}")
-                      req.add_header("Accept", "application/vnd.github+json")
-                      req.add_header("X-GitHub-Api-Version", "2022-11-28")
-                      req.add_header("Authorization", f"Bearer {token}")
-                      with urllib.request.urlopen(req, timeout=10) as resp:
-                          raw = resp.read().decode("utf-8", errors="replace")
-                      data = json.loads(raw)
+                      data = api_get_json(f"{api_base}/repos/{repo}/commits/{sha_val}") or {}
                       message = ((data or {}).get("commit") or {}).get("message") or ""
                       subject = normalize_subject(message)
                   except Exception:
@@ -1041,72 +1023,141 @@ jobs:
               commit_subject_cache[sha_val] = subject
               return subject
 
-          body = os.environ.get("EXISTING_BODY", "") or ""
-          if "\\n" in body and "\n" not in body:
-              body = body.replace("\\n", "\n")
+          def parse_projects_from_body(body: str) -> dict:
+              body = body or ""
+              if "\\n" in body and "\n" not in body:
+                  body = body.replace("\\n", "\n")
 
-          data_prefix = "<!-- deno-deploy-preview:data "
-          data_json = ""
-          has_data = False
-          data_start = body.find(data_prefix)
-          if data_start != -1:
-              data_start += len(data_prefix)
-              data_end = body.find("-->", data_start)
-              if data_end != -1:
-                  data_json = body[data_start:data_end].strip()
-                  has_data = True
-
-          data = {}
-          if has_data and data_json:
-              try:
-                  data = json.loads(data_json)
-              except Exception:
-                  data = {}
-                  has_data = False
-          if not isinstance(data, dict):
-              data = {}
+              data_prefix = "<!-- deno-deploy-preview:data "
+              data_json = ""
               has_data = False
+              data_start = body.find(data_prefix)
+              if data_start != -1:
+                  data_start += len(data_prefix)
+                  data_end = body.find("-->", data_start)
+                  if data_end != -1:
+                      data_json = body[data_start:data_end].strip()
+                      has_data = True
 
-          projects = data.get("projects")
-          if not isinstance(projects, dict):
-              projects = {}
+              data = {}
+              if has_data and data_json:
+                  try:
+                      data = json.loads(data_json)
+                  except Exception:
+                      data = {}
+                      has_data = False
+                  if not isinstance(data, dict):
+                      data = {}
+                      has_data = False
 
-          for _, history in list(projects.items()):
-              if not isinstance(history, list):
+              projects = data.get("projects") if isinstance(data, dict) else None
+              if not isinstance(projects, dict):
+                  projects = {}
+
+              for _, history in list(projects.items()):
+                  if not isinstance(history, list):
+                      continue
+                  for entry in history:
+                      if not isinstance(entry, dict):
+                          continue
+                      entry["url_line"] = normalize_url(entry.get("url_line") or "")
+                      entry["msg"] = normalize_subject(entry.get("msg") or entry.get("message") or "")
+
+              if not has_data and marker and marker in body:
+                  legacy_entries = {}
+                  for line in body.splitlines():
+                      m = re.match(r"-\\s+`([^`]+)`:\\s*(.+)", line.strip())
+                      if m:
+                          legacy_entries[m.group(1)] = m.group(2).strip()
+
+                  legacy_sha = ""
+                  legacy_mode = ""
+                  note_match = re.search(r"_Updated from `([^`]+)` \\(([^)]+)\\)\\._", body)
+                  if note_match:
+                      legacy_sha = note_match.group(1)
+                      legacy_mode = note_match.group(2)
+
+                  for p, line in legacy_entries.items():
+                      if not line:
+                          continue
+                      projects.setdefault(p, []).append(
+                          {
+                              "ts": "",
+                              "sha": legacy_sha,
+                              "mode": legacy_mode,
+                              "url_line": normalize_url(line),
+                              "run_url": "",
+                              "msg": "",
+                          }
+                      )
+
+              return projects
+
+          def normalize_entry(entry: dict) -> dict:
+              entry = entry or {}
+              return {
+                  "ts": (entry.get("ts") or "").strip(),
+                  "sha": (entry.get("sha") or "").strip(),
+                  "mode": (entry.get("mode") or "").strip(),
+                  "url_line": normalize_url(entry.get("url_line") or ""),
+                  "run_url": (entry.get("run_url") or "").strip(),
+                  "msg": normalize_subject(entry.get("msg") or entry.get("message") or ""),
+              }
+
+          def entry_key(entry: dict):
+              url_val = normalize_url(entry.get("url_line") or "")
+              if url_val:
+                  return ("url", url_val)
+              run_val = (entry.get("run_url") or "").strip()
+              if run_val:
+                  return ("run", run_val)
+              sha_val = (entry.get("sha") or "").strip()
+              ts_val = (entry.get("ts") or "").strip()
+              if sha_val and ts_val:
+                  return ("sha_ts", sha_val, ts_val)
+              if sha_val:
+                  return ("sha", sha_val)
+              return ("raw", json.dumps(entry, sort_keys=True, separators=(",", ":")))
+
+          comments = fetch_issue_comments()
+          marker_comments = []
+          for c in comments:
+              if not isinstance(c, dict):
                   continue
-              for entry in history:
-                  if not isinstance(entry, dict):
+              body = (c.get("body") or "").strip()
+              if marker and marker in body:
+                  cid = c.get("id")
+                  if cid is None:
                       continue
-                  entry["url_line"] = normalize_url(entry.get("url_line") or "")
-                  entry["msg"] = normalize_subject(entry.get("msg") or entry.get("message") or "")
-
-          if not has_data and marker in body:
-              legacy_entries = {}
-              for line in body.splitlines():
-                  m = re.match(r"-\\s+`([^`]+)`:\\s*(.+)", line.strip())
-                  if m:
-                      legacy_entries[m.group(1)] = m.group(2).strip()
-
-              legacy_sha = ""
-              legacy_mode = ""
-              note_match = re.search(r"_Updated from `([^`]+)` \\(([^)]+)\\)\\._", body)
-              if note_match:
-                  legacy_sha = note_match.group(1)
-                  legacy_mode = note_match.group(2)
-
-              for p, line in legacy_entries.items():
-                  if not line:
+                  try:
+                      cid_int = int(cid)
+                  except Exception:
                       continue
-                  projects.setdefault(p, []).append(
-                      {
-                          "ts": "",
-                          "sha": legacy_sha,
-                          "mode": legacy_mode,
-                          "url_line": normalize_url(line),
-                          "run_url": "",
-                          "msg": "",
-                      }
-                  )
+                  marker_comments.append({"id": cid_int, "body": body})
+
+          marker_comments.sort(key=lambda x: x["id"])
+          existing_id = str(marker_comments[-1]["id"]) if marker_comments else ""
+
+          projects = {}
+          seen = {}
+          for c in marker_comments:
+              parsed = parse_projects_from_body(c.get("body") or "")
+              if not isinstance(parsed, dict):
+                  continue
+              for p, history in parsed.items():
+                  if not isinstance(history, list):
+                      continue
+                  out = projects.setdefault(p, [])
+                  seen_set = seen.setdefault(p, set())
+                  for raw_entry in history:
+                      if not isinstance(raw_entry, dict):
+                          continue
+                      normalized = normalize_entry(raw_entry)
+                      key = entry_key(normalized)
+                      if key in seen_set:
+                          continue
+                      out.append(normalized)
+                      seen_set.add(key)
 
           if project and url_line:
               history = projects.setdefault(project, [])
@@ -1124,6 +1175,8 @@ jobs:
                           "msg": "",
                       }
                   )
+                  seen_set = seen.setdefault(project, set())
+                  seen_set.add(entry_key(history[-1]))
 
           for _, history in list(projects.items()):
               if not isinstance(history, list):
@@ -1155,7 +1208,7 @@ jobs:
               return f"{dt.day:02d} {month} {dt.hour:02d}:{dt.minute:02d}"
 
           def render(pdata: dict, truncated: bool) -> str:
-              payload = {"version": 2, "projects": pdata}
+              payload = {"version": 1, "projects": pdata}
               data_line = "<!-- deno-deploy-preview:data " + json.dumps(
                   payload, separators=(",", ":"), sort_keys=True
               ) + " -->"
@@ -1238,10 +1291,9 @@ jobs:
 
                   if previous:
                       count = len(previous)
-                      plural = "deployments" if count != 1 else "deployment"
                       lines.append("")
                       lines.append("<details>")
-                      lines.append(f"<summary><strong>Show {count} previous {plural}</strong></summary>")
+                      lines.append(f"<summary><strong>Show {count} previous deployments</strong></summary>")
                       lines.append("")
                       lines.append("<table>")
                       for idx, entry in enumerate(previous):
@@ -1275,9 +1327,24 @@ jobs:
               truncated = True
               rendered = render(projects, truncated=False)
 
-          print(render(projects, truncated=truncated), end="")
+          try:
+              new_body = render(projects, truncated=truncated)
+          except Exception as e:
+              print(f"::warning::Failed to render PR deploy comment: {e}", file=sys.stderr)
+              new_body = marker
+
+          if out_file:
+              try:
+                  with open(out_file, "w", encoding="utf-8") as f:
+                      f.write(new_body)
+              except Exception as e:
+                  print(f"::warning::Failed to write PR deploy comment body: {e}", file=sys.stderr)
+
+          print(existing_id, end="")
           PY
           )"
+          new_body="$(cat "$body_path")"
+          rm -f "$body_path"
 
           payload="$(
             BODY="$new_body" python - <<'PY'
