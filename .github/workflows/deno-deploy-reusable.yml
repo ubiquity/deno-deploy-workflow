@@ -807,10 +807,7 @@ jobs:
                 exit 1
               fi
 
-              sleep_for=$(( attempt * 10 ))
-              if [ $sleep_for -gt 60 ]; then
-                sleep_for=60
-              fi
+              sleep_for=10
               if [ $sleep_for -gt $remaining ]; then
                 sleep_for=$remaining
               fi
