@@ -797,6 +797,26 @@ jobs:
               attempt=$(( attempt + 1 ))
               continue
             fi
+            if echo "$output" | grep -qi "error reading a body from connection"; then
+              now=$(date +%s)
+              elapsed=$(( now - start_time ))
+              remaining=$(( max_seconds - elapsed ))
+              if [ $remaining -le 0 ]; then
+                echo "::error::deployctl transient network error persisted for ~${elapsed}s; exhausted retry window (6h budget)"
+                echo "$output"
+                exit 1
+              fi
+
+              sleep_for=10
+              if [ $sleep_for -gt $remaining ]; then
+                sleep_for=$remaining
+              fi
+
+              echo "::warning::deployctl transient network error (attempt ${attempt}); sleeping ${sleep_for}s (elapsed ${elapsed}s, remaining ${remaining}s)"
+              sleep "$sleep_for"
+              attempt=$(( attempt + 1 ))
+              continue
+            fi
             echo "$output"
             exit $status
           done
