@@ -25,6 +25,7 @@ name: Deno Deploy
 
 on:
   push:
+  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -54,6 +55,80 @@ Notes:
 - To opt out of PR comments, set `comment_pr: false` in `with:`.
 - `forward_all_secrets: true` (opt-in) forwards all available GitHub secrets as runtime env vars; defaults exclude `DENO_DEPLOY_TOKEN` and `GITHUB_TOKEN`.
 - Secrets managed in GitHub UI—update secret, next deploy forwards it.
+
+## Fork PR previews (artifact pipeline)
+
+Forked PRs cannot access secrets or org/repo vars in `pull_request` runs, so deployments must happen in a second workflow. Use the build-only reusable workflow to create an artifact, then a `workflow_run` deploy that downloads the artifact and deploys it. Use `build_env_fork`/`runtime_env_fork` for public values (never service/admin keys).
+
+**PR build (fork-safe)**
+
+```yaml
+name: Deno Deploy (PR build)
+
+on:
+  pull_request:
+
+jobs:
+  build:
+    permissions:
+      contents: read
+      actions: write
+    uses: ubiquity/deno-deploy-workflow/.github/workflows/deno-deploy-build.yml@main
+    with:
+      entrypoint: serve.ts
+      root: .
+      install_command: |
+        bun install --frozen-lockfile
+      build_command: bun run build
+      include: |
+        static/**
+      build_env: |
+        VITE_SUPABASE_URL=${{ secrets.SUPABASE_URL }}
+        VITE_SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}
+      build_env_fork: |
+        VITE_SUPABASE_URL=https://<public-supabase-url>
+        VITE_SUPABASE_ANON_KEY=<public-anon-key>
+      artifact_name: deno-deploy-artifact
+```
+
+**PR deploy (artifact → preview)**
+
+```yaml
+name: Deno Deploy (PR preview)
+
+on:
+  workflow_run:
+    workflows: ["Deno Deploy (PR build)"]
+    types: [completed]
+
+jobs:
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      pull-requests: write
+    uses: ubiquity/deno-deploy-workflow/.github/workflows/deno-deploy-reusable.yml@main
+    with:
+      project: <subdomain>-ubq-fi
+      entrypoint: serve.ts
+      include: |
+        static/**
+      artifact_name: deno-deploy-artifact
+      artifact_run_id: ${{ github.event.workflow_run.id }}
+      artifact_path: .deploy-artifact
+      runtime_env_fork: |
+        SUPABASE_URL=https://<public-supabase-url>
+        SUPABASE_ANON_KEY=<public-anon-key>
+    secrets: inherit
+```
+
+Notes:
+- `runtime_env_fork`/`env_var_keys_fork` apply only to forked PRs; internal branches still use `runtime_env`/`env_var_keys`.
+- Set `allow_fork_secrets: true` only if you accept the risk of exposing secrets to untrusted code (not recommended).
+- Use the same `include` as your normal deploy so deployctl sees the expected build outputs.
+- When using the fork preview pipeline, remove `pull_request` from your normal deploy workflow (or gate it to same-repo branches) to avoid a second deploy attempt that will fail on missing secrets.
 
 ### Bun usage (Dec 2025)
 

@@ -22,6 +22,21 @@ on:
         required: false
         type: string
         default: "."
+      artifact_name:
+        description: Optional artifact name to download and deploy from
+        required: false
+        type: string
+        default: ""
+      artifact_run_id:
+        description: Workflow run id that produced the artifact (required when artifact_name is set)
+        required: false
+        type: string
+        default: ""
+      artifact_path:
+        description: Local path to download artifact into
+        required: false
+        type: string
+        default: ".deploy-artifact"
       deno_version:
         description: Deno version range
         required: false
@@ -76,8 +91,18 @@ on:
         required: false
         type: string
         default: ""
+      env_var_keys_fork:
+        description: Newline-separated env var names to forward as --env for forked PR previews
+        required: false
+        type: string
+        default: ""
       runtime_env:
         description: Newline-separated KEY=VALUE lines to forward as --env (preferred)
+        required: false
+        type: string
+        default: ""
+      runtime_env_fork:
+        description: Newline-separated KEY=VALUE lines to forward as --env for forked PR previews
         required: false
         type: string
         default: ""
@@ -88,6 +113,11 @@ on:
         default: ""
       forward_all_secrets:
         description: Forward all available GitHub secrets as runtime env vars (dangerous; opt-in)
+        required: false
+        type: boolean
+        default: false
+      allow_fork_secrets:
+        description: Allow forked PR previews to use runtime env/secrets (unsafe; default false)
         required: false
         type: boolean
         default: false
@@ -108,8 +138,18 @@ on:
         required: false
         type: string
         default: ""
+      project_secrets_fork:
+        description: Optional SECRET_NAME=ENV_VAR mappings for forked PR previews
+        required: false
+        type: string
+        default: ""
       preview_project_secrets:
         description: Optional SECRET_NAME=ENV_VAR mappings for preview deployments (overrides project_secrets)
+        required: false
+        type: string
+        default: ""
+      preview_project_secrets_fork:
+        description: Optional SECRET_NAME=ENV_VAR mappings for forked PR previews (overrides project_secrets_fork)
         required: false
         type: string
         default: ""
@@ -195,6 +235,7 @@ on:
         required: false
 
 permissions:
+  actions: read
   contents: read
   issues: write
   pull-requests: write
@@ -205,7 +246,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 360
     concurrency:
-      group: deno-deploy-${{ inputs.project }}-${{ github.ref }}
+      group: deno-deploy-${{ inputs.project }}-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.ref }}
       cancel-in-progress: true
     env:
       PROD_BRANCH: ${{ inputs.prod_branch != '' && inputs.prod_branch || github.event.repository.default_branch }}
@@ -213,16 +254,24 @@ jobs:
       PREVIEW_PROJECT: ${{ inputs.preview_project }}
       ENTRYPOINT: ${{ inputs.entrypoint }}
       ROOT_DIR: ${{ inputs.root }}
+      ARTIFACT_NAME: ${{ inputs.artifact_name }}
+      ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
+      ARTIFACT_PATH: ${{ inputs.artifact_path }}
       INCLUDE: ${{ inputs.include }}
       EXCLUDE: ${{ inputs.exclude }}
       RUNTIME_ENV_KEYS: ${{ inputs.env_var_keys }}
+      RUNTIME_ENV_KEYS_FORK: ${{ inputs.env_var_keys_fork }}
       RUNTIME_ENV: ${{ inputs.runtime_env }}
+      RUNTIME_ENV_FORK: ${{ inputs.runtime_env_fork }}
       BUILD_ENV: ${{ inputs.build_env }}
       FORWARD_ALL_SECRETS: ${{ inputs.forward_all_secrets }}
+      ALLOW_FORK_SECRETS: ${{ inputs.allow_fork_secrets }}
       FORWARD_ALL_SECRETS_EXCLUDE: ${{ inputs.forward_all_secrets_exclude }}
       ENSURE_PROJECT: ${{ inputs.ensure_project }}
       PROJECT_SECRETS: ${{ inputs.project_secrets != '' && inputs.project_secrets || secrets.DENO_PROJECT_SECRETS || '' }}
+      PROJECT_SECRETS_FORK: ${{ inputs.project_secrets_fork }}
       PREVIEW_PROJECT_SECRETS: ${{ inputs.preview_project_secrets != '' && inputs.preview_project_secrets || secrets.DENO_PREVIEW_PROJECT_SECRETS || '' }}
+      PREVIEW_PROJECT_SECRETS_FORK: ${{ inputs.preview_project_secrets_fork }}
       REQUIRED_ENV: ${{ inputs.required_env }}
       BUILD_COMMAND: ${{ inputs.build_command }}
       INSTALL_COMMAND: ${{ inputs.install_command }}
@@ -259,6 +308,75 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: ${{ inputs.submodules }}
+
+      - name: Detect fork context
+        id: fork
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REPO: ${{ github.repository }}
+          HEAD_REPO_PR: ${{ github.event.pull_request.head.repo.full_name || '' }}
+          HEAD_REPO_RUN: ${{ github.event.workflow_run.head_repository.full_name || '' }}
+        run: |
+          set -euo pipefail
+          is_fork=false
+          case "$EVENT_NAME" in
+            pull_request)
+              if [ -n "$HEAD_REPO_PR" ] && [ "$HEAD_REPO_PR" != "$BASE_REPO" ]; then
+                is_fork=true
+              fi
+              ;;
+            workflow_run)
+              if [ -n "$HEAD_REPO_RUN" ] && [ "$HEAD_REPO_RUN" != "$BASE_REPO" ]; then
+                is_fork=true
+              fi
+              ;;
+          esac
+          echo "is_fork=$is_fork" >> "$GITHUB_OUTPUT"
+          echo "IS_FORK=$is_fork" >> "$GITHUB_ENV"
+
+      - name: Apply fork-safe env overrides
+        if: env.IS_FORK == 'true' && env.ALLOW_FORK_SECRETS != 'true'
+        run: |
+          set -euo pipefail
+          {
+            echo "RUNTIME_ENV_KEYS<<EOF"
+            echo "$RUNTIME_ENV_KEYS_FORK"
+            echo "EOF"
+            echo "RUNTIME_ENV<<EOF"
+            echo "$RUNTIME_ENV_FORK"
+            echo "EOF"
+            echo "PROJECT_SECRETS<<EOF"
+            echo "$PROJECT_SECRETS_FORK"
+            echo "EOF"
+            echo "PREVIEW_PROJECT_SECRETS<<EOF"
+            echo "$PREVIEW_PROJECT_SECRETS_FORK"
+            echo "EOF"
+            echo "FORWARD_ALL_SECRETS=false"
+          } >> "$GITHUB_ENV"
+
+      - name: Validate artifact inputs
+        if: env.ARTIFACT_NAME != ''
+        run: |
+          set -euo pipefail
+          if [ -z "$ARTIFACT_RUN_ID" ]; then
+            echo "::error::artifact_run_id is required when artifact_name is set"
+            exit 1
+          fi
+
+      - name: Download deploy artifact
+        if: env.ARTIFACT_NAME != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ARTIFACT_PATH }}
+          run-id: ${{ env.ARTIFACT_RUN_ID }}
+          repository: ${{ github.repository }}
+
+      - name: Use artifact as deploy root
+        if: env.ARTIFACT_NAME != ''
+        run: |
+          set -euo pipefail
+          echo "ROOT_DIR=$ARTIFACT_PATH" >> "$GITHUB_ENV"
 
       - name: Set up Deno
         uses: denoland/setup-deno@v2
@@ -334,6 +452,9 @@ jobs:
         id: target
         env:
           REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_EVENT: ${{ github.event.workflow_run.event || '' }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch || '' }}
         run: |
           set -euo pipefail
           project="${PROJECT:-}"
@@ -371,9 +492,16 @@ jobs:
             exit 1
           fi
 
+          ref_name="${REF_NAME:-}"
+          if [ "$EVENT_NAME" = "workflow_run" ] && [ -n "$HEAD_BRANCH" ]; then
+            ref_name="$HEAD_BRANCH"
+          fi
+
           mode="preview"
           target="$preview"
-          if [ "$REF_NAME" = "$PROD_BRANCH" ]; then
+          if [ "$EVENT_NAME" = "workflow_run" ] && [ "$WORKFLOW_EVENT" = "pull_request" ]; then
+            :
+          elif [ "$ref_name" = "$PROD_BRANCH" ]; then
             mode="production"
             target="$project"
           fi
@@ -382,7 +510,7 @@ jobs:
           echo "project=$target" >> "$GITHUB_OUTPUT"
 
       - name: Export build env
-        if: steps.preflight.outputs.deploy == 'yes' && env.BUILD_ENV != ''
+        if: steps.preflight.outputs.deploy == 'yes' && env.BUILD_ENV != '' && env.ARTIFACT_NAME == ''
         run: |
           set -euo pipefail
           printf '%s\n' "$BUILD_ENV" | envsubst >> "$GITHUB_ENV"
@@ -401,13 +529,13 @@ jobs:
           fi
 
       - name: Install dependencies
-        if: steps.preflight.outputs.deploy == 'yes' && env.INSTALL_COMMAND != ''
+        if: steps.preflight.outputs.deploy == 'yes' && env.INSTALL_COMMAND != '' && env.ARTIFACT_NAME == ''
         run: |
           set -euo pipefail
           printf '%s\n' "$INSTALL_COMMAND" | bash
 
       - name: Build
-        if: steps.preflight.outputs.deploy == 'yes' && env.BUILD_COMMAND != ''
+        if: steps.preflight.outputs.deploy == 'yes' && env.BUILD_COMMAND != '' && env.ARTIFACT_NAME == ''
         run: |
           set -euo pipefail
           printf '%s\n' "$BUILD_COMMAND" | bash
@@ -873,14 +1001,14 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Comment deployment URL on PR
-        if: steps.preflight.outputs.deploy == 'yes' && env.COMMENT_PR == 'true' && steps.deploy.outputs.mode == 'preview' && (github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        if: steps.preflight.outputs.deploy == 'yes' && env.COMMENT_PR == 'true' && steps.deploy.outputs.mode == 'preview' && (github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_run')
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
-          PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || '' }}
           REPO: ${{ github.repository }}
-          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          SHA: ${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha || github.sha }}
           TARGET_PROJECT: ${{ steps.deploy.outputs.project }}
           MODE: ${{ steps.deploy.outputs.mode }}
           DEPLOYMENT_URL: ${{ steps.deployed_url.outputs.deployment_url || format('https://{0}.deno.dev', steps.deploy.outputs.project) }}

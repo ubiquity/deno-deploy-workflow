@@ -1,0 +1,294 @@
+name: Reusable - Deno Deploy Build (artifact)
+
+on:
+  workflow_call:
+    inputs:
+      entrypoint:
+        description: Entrypoint file passed to deployctl (relative to root)
+        required: true
+        type: string
+      root:
+        description: Directory to build from
+        required: false
+        type: string
+        default: "."
+      deno_version:
+        description: Deno version range
+        required: false
+        type: string
+        default: v2.x
+      node_version:
+        description: Set to install Node.js (empty to skip)
+        required: false
+        type: string
+        default: ""
+      bun_version:
+        description: Set to install Bun (empty to skip)
+        required: false
+        type: string
+        default: ""
+      install_command:
+        description: Optional install command (multi-line allowed)
+        required: false
+        type: string
+        default: ""
+      build_command:
+        description: Optional build command (multi-line allowed)
+        required: false
+        type: string
+        default: ""
+      include:
+        description: Newline-separated include globs to force into the artifact
+        required: false
+        type: string
+        default: ""
+      exclude:
+        description: Newline-separated exclude globs for artifact packaging
+        required: false
+        type: string
+        default: |
+          .git
+          .github
+          node_modules
+          dist
+          build
+          coverage
+          .turbo
+          .next
+          .vercel
+      build_env:
+        description: Newline-separated KEY=VALUE lines to export before install/build
+        required: false
+        type: string
+        default: ""
+      build_env_fork:
+        description: Newline-separated KEY=VALUE lines to export before install/build for forked PRs
+        required: false
+        type: string
+        default: ""
+      artifact_name:
+        description: Artifact name to upload
+        required: false
+        type: string
+        default: deno-deploy-artifact
+      artifact_path:
+        description: Local path to assemble artifact into
+        required: false
+        type: string
+        default: ".deploy-artifact"
+      submodules:
+        description: Submodules checkout mode (empty to skip, 'recursive' for recursive)
+        required: false
+        type: string
+        default: ""
+    secrets:
+      SUPABASE_URL:
+        required: false
+      SUPABASE_ANON_KEY:
+        required: false
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  build:
+    name: Build deploy artifact
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    env:
+      ENTRYPOINT: ${{ inputs.entrypoint }}
+      ROOT_DIR: ${{ inputs.root }}
+      INCLUDE: ${{ inputs.include }}
+      EXCLUDE: ${{ inputs.exclude }}
+      BUILD_ENV: ${{ inputs.build_env }}
+      BUILD_ENV_FORK: ${{ inputs.build_env_fork }}
+      INSTALL_COMMAND: ${{ inputs.install_command }}
+      BUILD_COMMAND: ${{ inputs.build_command }}
+      DENO_VERSION: ${{ inputs.deno_version }}
+      NODE_VERSION: ${{ inputs.node_version }}
+      BUN_VERSION: ${{ inputs.bun_version }}
+      ARTIFACT_NAME: ${{ inputs.artifact_name }}
+      ARTIFACT_PATH: ${{ inputs.artifact_path }}
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+      SUPABASE_URL: ${{ vars.SUPABASE_URL || secrets.SUPABASE_URL || '' }}
+      SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY || secrets.SUPABASE_ANON_KEY || '' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          submodules: ${{ inputs.submodules }}
+
+      - name: Detect fork context
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REPO: ${{ github.repository }}
+          HEAD_REPO_PR: ${{ github.event.pull_request.head.repo.full_name || '' }}
+        run: |
+          set -euo pipefail
+          is_fork=false
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            if [ -n "$HEAD_REPO_PR" ] && [ "$HEAD_REPO_PR" != "$BASE_REPO" ]; then
+              is_fork=true
+            fi
+          fi
+          echo "IS_FORK=$is_fork" >> "$GITHUB_ENV"
+
+      - name: Set up Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ env.DENO_VERSION }}
+
+      - name: Set up Node.js (optional)
+        if: env.NODE_VERSION != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Default Bun version (auto-detect)
+        run: |
+          set -euo pipefail
+          if [ -n "${BUN_VERSION:-}" ]; then
+            exit 0
+          fi
+
+          if printf '%s\n%s\n' "$INSTALL_COMMAND" "$BUILD_COMMAND" | grep -q 'bun '; then
+            echo "BUN_VERSION=1.3.x" >> "$GITHUB_ENV"
+            echo "Detected bun usage; defaulting BUN_VERSION=1.3.x"
+          fi
+
+      - name: Install Bun (optional)
+        if: env.BUN_VERSION != ''
+        run: |
+          set -euo pipefail
+          BUN_VERSION="${BUN_VERSION}" curl -fsSL https://bun.sh/install | bash
+          echo "${HOME}/.bun/bin" >> "$GITHUB_PATH"
+
+      - name: Show tool versions
+        run: |
+          set -euo pipefail
+          deno --version
+          if command -v node >/dev/null 2>&1; then node -v; fi
+          if command -v bun >/dev/null 2>&1; then bun --version; fi
+
+      - name: Select build env
+        if: env.BUILD_ENV != '' || env.BUILD_ENV_FORK != ''
+        run: |
+          set -euo pipefail
+          build_env="${BUILD_ENV:-}"
+          if [ "${IS_FORK:-false}" = "true" ] && [ -n "${BUILD_ENV_FORK:-}" ]; then
+            build_env="${BUILD_ENV_FORK:-}"
+          fi
+          {
+            echo "BUILD_ENV_EFFECTIVE<<EOF"
+            echo "$build_env"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+          if [ -n "$build_env" ]; then
+            printf '%s\n' "$build_env" | envsubst >> "$GITHUB_ENV"
+          fi
+
+      - name: Install dependencies
+        if: env.INSTALL_COMMAND != ''
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$INSTALL_COMMAND" | bash
+
+      - name: Build
+        if: env.BUILD_COMMAND != ''
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$BUILD_COMMAND" | bash
+
+      - name: "Guard: unresolved env placeholders"
+        if: env.BUILD_ENV_EFFECTIVE != ''
+        run: |
+          set -euo pipefail
+          collect_keys() {
+            awk '
+              /^[A-Za-z_][A-Za-z0-9_]*=/ { sub(/=.*/, "", $0); print $0 }
+              /^[A-Za-z_][A-Za-z0-9_]*$/ { print $0 }
+            '
+          }
+
+          keys="$(
+            printf '%s\n' "$BUILD_ENV_EFFECTIVE" | collect_keys | sort -u
+          )"
+
+          [ -z "$keys" ] && exit 0
+
+          search_terms=()
+          for k in $keys; do
+            search_terms+=("\$$k")
+            search_terms+=("\${$k}")
+          done
+
+          candidate_dirs=(static dist out public frontend/dist build)
+          matches=""
+
+          for term in "${search_terms[@]}"; do
+            for d in "${candidate_dirs[@]}"; do
+              dir="${ROOT_DIR}/${d}"
+              [ -d "$dir" ] || continue
+              found=$(rg --no-config --fixed-strings --no-heading --line-number "$term" "$dir" || true)
+              if [ -n "$found" ]; then
+                matches+=$'\n'"${d}:"
+                matches+=$'\n'"$found"
+              fi
+            done
+          done
+
+          if [ -n "$matches" ]; then
+            echo "::error::Detected unresolved env placeholders in built assets. Populate missing values and rerun."
+            printf '%s\n' "$matches"
+            exit 1
+          fi
+
+      - name: Assemble deploy artifact
+        run: |
+          set -euo pipefail
+          if [ ! -d "$ROOT_DIR" ]; then
+            echo "::error::Root directory not found: $ROOT_DIR"
+            exit 1
+          fi
+
+          artifact_dir="${ARTIFACT_PATH:-.deploy-artifact}"
+          rm -rf "$artifact_dir"
+          mkdir -p "$artifact_dir"
+
+          exclude_file="$(mktemp)"
+          printf '%s\n' "$EXCLUDE" | tr -d '\r' | sed '/^$/d' > "$exclude_file"
+          echo "$artifact_dir" >> "$exclude_file"
+
+          rsync -a --delete --prune-empty-dirs --exclude-from="$exclude_file" "${ROOT_DIR}/" "$artifact_dir/"
+          rm -f "$exclude_file"
+
+          for path in "$ENTRYPOINT" "deno.json"; do
+            [ -f "${ROOT_DIR}/${path}" ] || continue
+            mkdir -p "$artifact_dir/$(dirname "$path")"
+            cp -a "${ROOT_DIR}/${path}" "$artifact_dir/${path}"
+          done
+
+          if [ -n "$INCLUDE" ]; then
+            shopt -s globstar nullglob
+            while IFS= read -r inc; do
+              inc=$(echo "$inc" | tr -d '\r' | xargs)
+              [ -z "$inc" ] && continue
+              for src in "${ROOT_DIR}"/$inc; do
+                [ -e "$src" ] || continue
+                rel="${src#"$ROOT_DIR"/}"
+                mkdir -p "$artifact_dir/$(dirname "$rel")"
+                cp -a "$src" "$artifact_dir/$rel"
+              done
+            done <<< "$INCLUDE"
+            shopt -u globstar nullglob
+          fi
+
+      - name: Upload deploy artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ARTIFACT_PATH }}
+          if-no-files-found: error
