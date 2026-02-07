@@ -286,12 +286,6 @@ jobs:
             exit 1
           fi
 
-          # Shared previews don't have per-branch projects to delete.
-          if [ "${PREVIEW_MODE:-shared}" != "branch" ]; then
-            echo "skip=yes" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
           deleted_ref="${DELETED_REF:-}"
           if [ -z "$deleted_ref" ]; then
             echo "::error::Missing deleted branch name (github.event.ref)"
