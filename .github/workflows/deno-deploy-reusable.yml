@@ -245,6 +245,30 @@ permissions:
   issues: write
   pull-requests: write
 
+env:
+  # Shared helper used by both deploy + cleanup jobs to guarantee identical preview name derivation.
+  # This is intentionally stored once (as a function string) to avoid subtle divergence across steps.
+  BRANCH_PREVIEW_PROJECT_FN: |
+    compute_branch_preview_project() {
+      local ref="$1"
+      local base="$2"
+
+      local slug core hash prefix_len max_core
+      slug="$(printf '%s' "$ref" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//; s/-+/-/g')"
+      [ -z "$slug" ] && slug="preview"
+
+      core="${slug}-${base}"
+      max_core=19
+      if [ ${#core} -gt $max_core ]; then
+        hash="$(printf '%s' "$core" | sha1sum | cut -c1-4)"
+        prefix_len=$((max_core - 5)) # '-' + 4-char hash
+        core="${core:0:$prefix_len}-${hash}"
+        core="$(printf '%s' "$core" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+      fi
+
+      printf '%s' "${core}-ubq-fi"
+    }
+
 jobs:
   cleanup:
     name: Cleanup Preview Project (branch delete)
@@ -258,14 +282,6 @@ jobs:
       DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
       DELETED_REF: ${{ github.event.ref }}
     steps:
-      - name: Validate preview_mode
-        run: |
-          set -euo pipefail
-          case "${PREVIEW_MODE}" in
-            shared|branch) ;;
-            *) echo "::error::Invalid preview_mode '${PREVIEW_MODE}'. Must be 'shared' or 'branch'."; exit 1 ;;
-          esac
-
       - name: Compute preview project name
         id: computed
         run: |
@@ -303,19 +319,8 @@ jobs:
 
           base="${project%-ubq-fi}"
 
-          slug="$(printf '%s' "$deleted_ref" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//; s/-+/-/g')"
-          [ -z "$slug" ] && slug="preview"
-
-          core="${slug}-${base}"
-          max_core=19
-          if [ ${#core} -gt $max_core ]; then
-            hash="$(printf '%s' "$core" | sha1sum | cut -c1-4)"
-            prefix_len=$((max_core - 5)) # '-' + 4-char hash
-            core="${core:0:$prefix_len}-${hash}"
-            core="$(printf '%s' "$core" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
-          fi
-
-          preview="${core}-ubq-fi"
+          eval "$BRANCH_PREVIEW_PROJECT_FN"
+          preview="$(compute_branch_preview_project "$deleted_ref" "$base")"
           echo "project=$preview" >> "$GITHUB_OUTPUT"
           echo "skip=no" >> "$GITHUB_OUTPUT"
 
@@ -564,7 +569,7 @@ jobs:
         id: target
         env:
           REF_NAME: ${{ github.ref_name }}
-          HEAD_REF: ${{ github.head_ref || '' }}
+          HEAD_REF: ${{ github.head_ref }}
           EVENT_NAME: ${{ github.event_name }}
           WORKFLOW_EVENT: ${{ github.event.workflow_run.event || '' }}
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch || '' }}
@@ -597,6 +602,10 @@ jobs:
 
           preview="${PREVIEW_PROJECT:-}"
           ref_name="${REF_NAME:-}"
+          head_ref="${HEAD_REF:-}"
+          if [ -n "$head_ref" ]; then
+            ref_name="$head_ref"
+          fi
           if [ "$EVENT_NAME" = "workflow_run" ] && [ -n "$HEAD_BRANCH" ]; then
             ref_name="$HEAD_BRANCH"
           elif [ "$EVENT_NAME" = "pull_request" ] && [ -n "${HEAD_REF:-}" ]; then
@@ -608,19 +617,8 @@ jobs:
           if [ -z "$preview" ]; then
             if [ "${PREVIEW_MODE:-shared}" = "branch" ]; then
               # Per-branch preview project: <branch>-<base>-ubq-fi (clamped to 26 chars with hash)
-              slug="$(printf '%s' "$ref_name" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//; s/-+/-/g')"
-              [ -z "$slug" ] && slug="preview"
-
-              core="${slug}-${base}"
-              max_core=19
-              if [ ${#core} -gt $max_core ]; then
-                hash="$(printf '%s' "$core" | sha1sum | cut -c1-4)"
-                prefix_len=$((max_core - 5)) # '-' + 4-char hash
-                core="${core:0:$prefix_len}-${hash}"
-                core="$(printf '%s' "$core" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
-              fi
-
-              preview="${core}-ubq-fi"
+              eval "$BRANCH_PREVIEW_PROJECT_FN"
+              preview="$(compute_branch_preview_project "$ref_name" "$base")"
             else
               # Shared preview project: p-<base>-ubq-fi (clamped)
               # Clamp base to keep preview <=26 with prefix/suffix: p- + base + -ubq-fi
