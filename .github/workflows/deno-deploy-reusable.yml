@@ -294,9 +294,10 @@ jobs:
 
           preview="${PREVIEW_PROJECT:-}"
           if [ -n "$preview" ]; then
-            # Caller explicitly set a preview project; treat it as the cleanup target.
-            echo "project=$preview" >> "$GITHUB_OUTPUT"
-            echo "skip=no" >> "$GITHUB_OUTPUT"
+            # In branch preview mode, an explicit preview_project is ambiguous (it may be shared across branches).
+            # Avoid deleting a potentially shared project when any branch is deleted.
+            echo "::warning::Skipping cleanup because preview_project was explicitly provided (not a derived per-branch project)"
+            echo "skip=yes" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
