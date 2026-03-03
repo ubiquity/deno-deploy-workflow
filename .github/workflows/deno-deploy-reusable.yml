@@ -553,10 +553,12 @@ jobs:
             router_host="preview-${base}.ubq.fi"
           fi
 
-          echo "mode=$mode" >> "$GITHUB_OUTPUT"
-          echo "project=$target" >> "$GITHUB_OUTPUT"
-          echo "router_host=$router_host" >> "$GITHUB_OUTPUT"
-          echo "branch_slug=$branch_slug" >> "$GITHUB_OUTPUT"
+          {
+            echo "mode=$mode"
+            echo "project=$target"
+            echo "router_host=$router_host"
+            echo "branch_slug=$branch_slug"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Export build env
         if: steps.preflight.outputs.deploy == 'yes' && env.BUILD_ENV != '' && env.ARTIFACT_NAME == ''
