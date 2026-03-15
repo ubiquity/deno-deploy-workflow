@@ -8,7 +8,9 @@ This repository provides a standardized, reusable Deno Deploy workflow at `.gith
 - Optional Node.js and Bun setup for builds (uses official install scripts).
 - Configurable install/build commands (multi-line supported).
 - Branch-aware deployments: production on specified branch (default: `development`), preview on others.
+- Per-branch preview projects (default): each branch gets its own Deno Deploy project (`<sanitized-branch>-<base>-ubq-fi`), enabling simultaneous previews at `<branch>-<sub>.ubq.fi`. Set `preview_mode: shared` for legacy single-project behavior.
 - Automatic preview project creation if missing.
+- Branch cleanup: use the `deno-deploy-cleanup.yml` reusable workflow to automatically delete per-branch preview projects when branches are deleted.
 - Optional project existence check. `project_secrets` are forwarded as runtime env for the deploy (Deno Deploy secrets API is no longer supported).
 - Gitignore-based excludes with custom includes for build outputs.
 - Runtime env var forwarding (preferred over env_var_keys for simplicity).
@@ -55,6 +57,53 @@ Notes:
 - To opt out of PR comments, set `comment_pr: false` in `with:`.
 - `forward_all_secrets: true` (opt-in) forwards all available GitHub secrets as runtime env vars; defaults exclude `DENO_DEPLOY_TOKEN` and `GITHUB_TOKEN`.
 - Secrets managed in GitHub UI—update secret, next deploy forwards it.
+
+## Per-branch preview deployments
+
+By default (`preview_mode: branch`), each non-default branch gets its own Deno Deploy project and preview URL. Branch names are sanitized for DNS compatibility:
+
+| Branch | Preview project | Router URL |
+|--------|----------------|------------|
+| `feat/widget` | `feat-widget-pay-ubq-fi` | `feat-widget-pay.ubq.fi` |
+| `fix/login-bug` | `fix-login-bug-pay-ubq-fi` | `fix-login-bug-pay.ubq.fi` |
+| `development` (prod) | `pay-ubq-fi` | `pay.ubq.fi` |
+
+Branch name sanitization rules:
+- Lowercased, non-alphanumeric characters replaced with hyphens
+- Consecutive hyphens collapsed, leading/trailing hyphens stripped
+- Truncated with a 4-char hash suffix if the resulting project name exceeds 26 characters
+
+To revert to the legacy single-project preview behavior, set `preview_mode: shared`:
+
+```yaml
+    with:
+      project: pay-ubq-fi
+      preview_mode: shared  # all branches share p-pay-ubq-fi
+```
+
+### Branch cleanup
+
+To automatically delete per-branch preview projects when branches are deleted, add a cleanup workflow to each consuming repository:
+
+```yaml
+name: Deno Deploy Cleanup
+
+on:
+  delete:
+
+jobs:
+  cleanup:
+    if: github.event.ref_type == 'branch'
+    permissions:
+      contents: read
+    uses: ubiquity/deno-deploy-workflow/.github/workflows/deno-deploy-cleanup.yml@main
+    with:
+      project: <subdomain>-ubq-fi
+    secrets:
+      DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
+```
+
+The cleanup workflow is idempotent: it succeeds silently if the project does not exist or was already deleted.
 
 ## Fork PR previews (artifact pipeline)
 
