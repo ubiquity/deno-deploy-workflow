@@ -189,6 +189,11 @@ on:
         required: false
         type: boolean
         default: false
+      preview_mode:
+        description: "Preview project strategy: 'shared' uses a single preview project for all branches (legacy p-<base>-ubq-fi), 'branch' creates a per-branch project (<sanitized-branch>-<base>-ubq-fi)"
+        required: false
+        type: string
+        default: "branch"
       create_preview:
         description: Create preview project when missing
         required: false
@@ -275,6 +280,7 @@ jobs:
       REQUIRED_ENV: ${{ inputs.required_env }}
       BUILD_COMMAND: ${{ inputs.build_command }}
       INSTALL_COMMAND: ${{ inputs.install_command }}
+      PREVIEW_MODE: ${{ inputs.preview_mode }}
       CREATE_PREVIEW: ${{ inputs.create_preview }}
       VERIFY_URL: ${{ inputs.verify_url }}
       COMMENT_PR: ${{ inputs.comment_pr }}
@@ -471,16 +477,82 @@ jobs:
             exit 1
           fi
 
+          ref_name="${REF_NAME:-}"
+          if [ "$EVENT_NAME" = "workflow_run" ] && [ -n "$HEAD_BRANCH" ]; then
+            ref_name="$HEAD_BRANCH"
+          fi
+
+          mode="preview"
+          if [ "$EVENT_NAME" = "workflow_run" ] && [ "$WORKFLOW_EVENT" = "pull_request" ]; then
+            :
+          elif [ "$ref_name" = "$PROD_BRANCH" ]; then
+            mode="production"
+          fi
+
+          if [ "$mode" = "production" ]; then
+            echo "mode=production" >> "$GITHUB_OUTPUT"
+            echo "project=$project" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # --- Preview project resolution ---
+          preview_mode="${PREVIEW_MODE:-branch}"
           preview="${PREVIEW_PROJECT:-}"
-          if [ -z "$preview" ]; then
-            base="${project%-ubq-fi}"
-            # Clamp base to keep preview <=26 with prefix/suffix: p- + base + -ubq-fi
+          base="${project%-ubq-fi}"
+          slug=""
+
+          if [ -n "$preview" ]; then
+            # Explicit preview project overrides everything
+            :
+          elif [ "$preview_mode" = "shared" ]; then
+            # Legacy shared preview: single p-<base>-ubq-fi for all branches
             if [ ${#base} -gt 17 ]; then
-              # 12 chars + dash + 4-char hash = 17
               hash=$(printf '%s' "$base" | sha1sum | cut -c1-4)
-              base="${base:0:12}-${hash}"
+              base_clamped="${base:0:12}-${hash}"
+            else
+              base_clamped="$base"
             fi
-            preview="p-${base}-ubq-fi"
+            preview="p-${base_clamped}-ubq-fi"
+          else
+            # Per-branch preview: <slug>-<base>-ubq-fi
+            # Sanitize branch name: lowercase, replace non-alphanumeric with hyphens,
+            # collapse consecutive hyphens, strip leading/trailing hyphens
+            slug=$(printf '%s' "$ref_name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
+
+            # Budget: 26 total, minus "-ubq-fi" (7) minus "-" separator (1) = 18 chars for slug+base
+            # We need at least 1 char for slug and 1 for base
+            suffix="-${base}-ubq-fi"
+            suffix_len=${#suffix}
+            max_slug=$(( 26 - suffix_len ))
+
+            if [ $max_slug -lt 1 ]; then
+              # Base name is too long; truncate base with hash
+              hash=$(printf '%s' "$base" | sha1sum | cut -c1-4)
+              base_short="${base:0:8}-${hash}"
+              suffix="-${base_short}-ubq-fi"
+              suffix_len=${#suffix}
+              max_slug=$(( 26 - suffix_len ))
+            fi
+
+            if [ ${#slug} -gt $max_slug ]; then
+              # Truncate slug and append short hash for uniqueness
+              hash=$(printf '%s' "$slug" | sha1sum | cut -c1-4)
+              if [ $max_slug -ge 6 ]; then
+                # <truncated>-<hash>
+                slug="${slug:0:$(( max_slug - 5 ))}-${hash}"
+              else
+                slug="${hash}"
+              fi
+            fi
+
+            # Ensure slug doesn't start or end with hyphen after truncation
+            slug=$(printf '%s' "$slug" | sed 's/^-//;s/-$//')
+
+            if [ -z "$slug" ]; then
+              slug="br"
+            fi
+
+            preview="${slug}${suffix}"
           fi
 
           if [ ${#preview} -gt 26 ]; then
@@ -492,22 +564,9 @@ jobs:
             exit 1
           fi
 
-          ref_name="${REF_NAME:-}"
-          if [ "$EVENT_NAME" = "workflow_run" ] && [ -n "$HEAD_BRANCH" ]; then
-            ref_name="$HEAD_BRANCH"
-          fi
-
-          mode="preview"
-          target="$preview"
-          if [ "$EVENT_NAME" = "workflow_run" ] && [ "$WORKFLOW_EVENT" = "pull_request" ]; then
-            :
-          elif [ "$ref_name" = "$PROD_BRANCH" ]; then
-            mode="production"
-            target="$project"
-          fi
-
-          echo "mode=$mode" >> "$GITHUB_OUTPUT"
-          echo "project=$target" >> "$GITHUB_OUTPUT"
+          echo "mode=preview" >> "$GITHUB_OUTPUT"
+          echo "project=$preview" >> "$GITHUB_OUTPUT"
+          echo "branch_slug=$slug" >> "$GITHUB_OUTPUT"
 
       - name: Export build env
         if: steps.preflight.outputs.deploy == 'yes' && env.BUILD_ENV != '' && env.ARTIFACT_NAME == ''
@@ -966,12 +1025,15 @@ jobs:
           MODE: ${{ steps.deploy.outputs.mode }}
           TARGET_PROJECT: ${{ steps.deploy.outputs.project }}
           DEPLOYMENT_URL: ${{ steps.deploy.outputs.deployment_url || '' }}
+          BRANCH_SLUG: ${{ steps.target.outputs.branch_slug || '' }}
         run: |
           set -euo pipefail
           mode="${MODE:-}"
           target_project="${TARGET_PROJECT:-}"
           prod_project="${PROJECT:-}"
           deployment_url="${DEPLOYMENT_URL:-}"
+          preview_mode="${PREVIEW_MODE:-branch}"
+          branch_slug="${BRANCH_SLUG:-}"
 
           project_url="https://${target_project}.deno.dev"
           router_url=""
@@ -984,6 +1046,9 @@ jobs:
           if [ -n "$base" ]; then
             if [ "$mode" = "production" ]; then
               router_url="https://${base}.ubq.fi"
+            elif [ "$preview_mode" = "branch" ] && [ -n "$branch_slug" ]; then
+              # Per-branch preview: <slug>-<base>.ubq.fi
+              router_url="https://${branch_slug}-${base}.ubq.fi"
             else
               router_url="https://preview-${base}.ubq.fi"
             fi

@@ -1,0 +1,131 @@
+name: Reusable - Deno Deploy Branch Cleanup
+
+on:
+  workflow_call:
+    inputs:
+      project:
+        description: Base Deno Deploy project name (must end with -ubq-fi)
+        required: true
+        type: string
+    secrets:
+      DENO_DEPLOY_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    name: Delete branch preview project
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'delete' && github.event.ref_type == 'branch'
+    timeout-minutes: 5
+    env:
+      PROJECT: ${{ inputs.project }}
+      DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
+
+    steps:
+      - name: Derive and delete preview project
+        env:
+          DELETED_BRANCH: ${{ github.event.ref }}
+          PROD_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          branch="${DELETED_BRANCH:-}"
+          if [ -z "$branch" ]; then
+            echo "No branch name found in delete event; skipping."
+            exit 0
+          fi
+
+          # Never clean up the production branch
+          if [ "$branch" = "$PROD_BRANCH" ]; then
+            echo "Deleted branch is the production branch; skipping cleanup."
+            exit 0
+          fi
+
+          project="${PROJECT:-}"
+          if [[ "$project" != *-ubq-fi ]]; then
+            echo "::error::Project name must end with '-ubq-fi'. Got: $project"
+            exit 1
+          fi
+          base="${project%-ubq-fi}"
+
+          # Sanitize branch name identically to deno-deploy-reusable.yml
+          slug=$(printf '%s' "$branch" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
+
+          suffix="-${base}-ubq-fi"
+          suffix_len=${#suffix}
+          max_slug=$(( 26 - suffix_len ))
+
+          if [ $max_slug -lt 1 ]; then
+            hash=$(printf '%s' "$base" | sha1sum | cut -c1-4)
+            base_short="${base:0:8}-${hash}"
+            suffix="-${base_short}-ubq-fi"
+            suffix_len=${#suffix}
+            max_slug=$(( 26 - suffix_len ))
+          fi
+
+          if [ ${#slug} -gt $max_slug ]; then
+            hash=$(printf '%s' "$slug" | sha1sum | cut -c1-4)
+            if [ $max_slug -ge 6 ]; then
+              slug="${slug:0:$(( max_slug - 5 ))}-${hash}"
+            else
+              slug="${hash}"
+            fi
+          fi
+
+          slug=$(printf '%s' "$slug" | sed 's/^-//;s/-$//')
+          if [ -z "$slug" ]; then
+            slug="br"
+          fi
+
+          preview_project="${slug}${suffix}"
+
+          echo "Deleting Deno Deploy project: $preview_project (branch: $branch)"
+
+          api_base="https://dash.deno.com/api/projects"
+          tmp_resp="$(mktemp)"
+
+          # Check if project exists
+          http_code=$(curl -sS -o "$tmp_resp" -w "%{http_code}" \
+            -H "Authorization: Bearer $DENO_DEPLOY_TOKEN" \
+            "$api_base/$preview_project" || echo "000")
+
+          if [ "$http_code" = "404" ]; then
+            echo "Project $preview_project does not exist; nothing to clean up."
+            rm -f "$tmp_resp"
+            exit 0
+          fi
+
+          if [ "$http_code" != "200" ]; then
+            echo "::warning::Unexpected response checking project $preview_project (HTTP $http_code)"
+            cat "$tmp_resp" || true
+            rm -f "$tmp_resp"
+            exit 0
+          fi
+
+          # Delete the project
+          http_code=$(curl -sS -o "$tmp_resp" -w "%{http_code}" \
+            -X DELETE \
+            -H "Authorization: Bearer $DENO_DEPLOY_TOKEN" \
+            "$api_base/$preview_project" || echo "000")
+
+          if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+            echo "Deleted project $preview_project"
+          elif [ "$http_code" = "404" ]; then
+            echo "Project $preview_project already deleted."
+          else
+            echo "::warning::Failed to delete project $preview_project (HTTP $http_code)"
+            cat "$tmp_resp" || true
+          fi
+
+          rm -f "$tmp_resp"
+
+          {
+            echo "### Deno Deploy Cleanup"
+            echo ""
+            echo "- Branch: ${branch}"
+            echo "- Project: ${preview_project}"
+            echo "- Status: deleted (HTTP ${http_code})"
+          } >> "$GITHUB_STEP_SUMMARY"
