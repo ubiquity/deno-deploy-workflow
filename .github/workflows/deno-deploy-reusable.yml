@@ -527,15 +527,17 @@ jobs:
                 fi
                 preview="${branch_slug}-${base}-ubq-fi"
                 router_host="${branch_slug}-${base}.ubq.fi"
-              else
-                # Legacy shared preview project and host
-                if [ ${#base} -gt 17 ]; then
-                  hash=$(printf '%s' "$base" | sha1sum | cut -c1-4)
-                  base="${base:0:12}-${hash}"
-                fi
-                preview="p-${base}-ubq-fi"
-                router_host="preview-${base}.ubq.fi"
               fi
+            fi
+            # Handle shared strategy (whether explicitly set or auto-switched due to long branch name)
+            if [ "$strategy" = "shared" ] && [ -z "$preview" ]; then
+              # Legacy shared preview project and host
+              if [ ${#base} -gt 17 ]; then
+                hash=$(printf '%s' "$base" | sha1sum | cut -c1-4)
+                base="${base:0:12}-${hash}"
+              fi
+              preview="p-${base}-ubq-fi"
+              router_host="preview-${base}.ubq.fi"
             fi
           fi
 

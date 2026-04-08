@@ -83,24 +83,36 @@ jobs:
             if [ "$strategy" = "branch" ]; then
               branch_slug="$(slugify "$ref_name")"
               if [ -z "$branch_slug" ]; then
-                echo "::notice::Unable to derive branch slug from ref '${ref_name}', skipping cleanup"
-                echo "skip=true" >> "$GITHUB_OUTPUT"
-                exit 0
+                branch_slug="preview"
               fi
 
               suffix="-${base}-ubq-fi"
               max_branch_len=$((26 - ${#suffix}))
               if [ $max_branch_len -lt 6 ]; then
+                # Project name is too long for branch-based previews; fall back to
+                # shared preview naming so repos with long names (e.g. notifications-ubq-fi)
+                # don't break after upgrading without having to explicitly set strategy=shared.
+                strategy="shared"
+              fi
+              if [ "$strategy" = "branch" ]; then
+                if [ ${#branch_slug} -gt $max_branch_len ]; then
+                  hash=$(printf '%s' "$branch_slug" | sha1sum | cut -c1-4)
+                  head_len=$((max_branch_len - 5))
+                  branch_slug="${branch_slug:0:${head_len}}-${hash}"
+                fi
+                target="${branch_slug}-${base}-ubq-fi"
+              fi
+              if [ "$strategy" = "shared" ] && [ -z "$target" ]; then
+                if [ ${#base} -gt 17 ]; then
+                  hash=$(printf '%s' "$base" | sha1sum | cut -c1-4)
+                  base="${base:0:12}-${hash}"
+                fi
+                target="p-${base}-ubq-fi"
+              fi
+              if [ "$strategy" = "branch" ] && [ -z "$target" ]; then
                 echo "::error::Cannot build branch preview name for base '${base}' within Deno project length limits"
                 exit 1
               fi
-              if [ ${#branch_slug} -gt $max_branch_len ]; then
-                hash=$(printf '%s' "$branch_slug" | sha1sum | cut -c1-4)
-                head_len=$((max_branch_len - 5))
-                branch_slug="${branch_slug:0:${head_len}}-${hash}"
-              fi
-
-              target="${branch_slug}-${base}-ubq-fi"
             else
               if [ ${#base} -gt 17 ]; then
                 hash=$(printf '%s' "$base" | sha1sum | cut -c1-4)

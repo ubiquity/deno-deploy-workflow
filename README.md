@@ -62,7 +62,7 @@ By default, previews are now generated per branch (instead of collapsing everyth
 
 - Branch `feat/widget` for `pay-ubq-fi` resolves to project `feat-widget-pay-ubq-fi`
 - Router URL becomes `https://feat-widget-pay.ubq.fi`
-- If a branch slug is too long, it is trimmed and hash-suffixed to stay within Deno's 26-char project-name limit.
+- If a branch slug is too long, it is trimmed and hash-suffixed to stay within Deno's 26-char project-name limit. If even a 6-char prefix cannot fit (i.e. base name is too long for any branch preview), the workflow automatically falls back to shared preview naming so the deployment still succeeds without requiring manual configuration.
 
 Optional input on the deploy reusable workflow:
 
