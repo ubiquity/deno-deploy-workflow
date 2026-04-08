@@ -514,24 +514,28 @@ jobs:
               suffix="-${base}-ubq-fi"
               max_branch_len=$((26 - ${#suffix}))
               if [ $max_branch_len -lt 6 ]; then
-                echo "::error::Cannot build branch preview name for base '${base}' within Deno project length limits"
-                exit 1
+                # Project name is too long for branch-based previews; fall back to
+                # shared preview naming so repos with long names (e.g. notifications-ubq-fi)
+                # don't break after upgrading without having to explicitly set strategy=shared.
+                strategy="shared"
               fi
-              if [ ${#branch_slug} -gt $max_branch_len ]; then
-                hash=$(printf '%s' "$branch_slug" | sha1sum | cut -c1-4)
-                head_len=$((max_branch_len - 5))
-                branch_slug="${branch_slug:0:${head_len}}-${hash}"
+              if [ "$strategy" = "branch" ]; then
+                if [ ${#branch_slug} -gt $max_branch_len ]; then
+                  hash=$(printf '%s' "$branch_slug" | sha1sum | cut -c1-4)
+                  head_len=$((max_branch_len - 5))
+                  branch_slug="${branch_slug:0:${head_len}}-${hash}"
+                fi
+                preview="${branch_slug}-${base}-ubq-fi"
+                router_host="${branch_slug}-${base}.ubq.fi"
+              else
+                # Legacy shared preview project and host
+                if [ ${#base} -gt 17 ]; then
+                  hash=$(printf '%s' "$base" | sha1sum | cut -c1-4)
+                  base="${base:0:12}-${hash}"
+                fi
+                preview="p-${base}-ubq-fi"
+                router_host="preview-${base}.ubq.fi"
               fi
-              preview="${branch_slug}-${base}-ubq-fi"
-              router_host="${branch_slug}-${base}.ubq.fi"
-            else
-              # Legacy shared preview project and host
-              if [ ${#base} -gt 17 ]; then
-                hash=$(printf '%s' "$base" | sha1sum | cut -c1-4)
-                base="${base:0:12}-${hash}"
-              fi
-              preview="p-${base}-ubq-fi"
-              router_host="preview-${base}.ubq.fi"
             fi
           fi
 
