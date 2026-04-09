@@ -78,6 +78,10 @@ jobs:
           base="${project%-ubq-fi}"
           target="${PREVIEW_PROJECT:-}"
           strategy="${PREVIEW_STRATEGY:-branch}"
+          if [ "$strategy" != "branch" ] && [ "$strategy" != "shared" ]; then
+            echo "::error::Invalid preview_strategy '${strategy}'. Expected 'branch' or 'shared'."
+            exit 1
+          fi
 
           if [ -z "$target" ]; then
             if [ "$strategy" = "branch" ]; then
@@ -124,6 +128,11 @@ jobs:
 
           if ! [[ "$target" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
             echo "::error::Derived preview project name is invalid: $target"
+            exit 1
+          fi
+          # Guard: refuse to delete the production project
+          if [ "$target" = "$project" ]; then
+            echo "::error::Refusing to delete production project '${project}' via preview cleanup"
             exit 1
           fi
 

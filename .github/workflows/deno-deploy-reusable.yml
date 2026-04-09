@@ -501,8 +501,11 @@ jobs:
 
           preview="${PREVIEW_PROJECT:-}"
           strategy="${PREVIEW_STRATEGY:-branch}"
+          if [ "$strategy" != "branch" ] && [ "$strategy" != "shared" ]; then
+            echo "::error::Invalid preview_strategy '${strategy}'. Expected 'branch' or 'shared'."
+            exit 1
+          fi
           branch_slug=""
-          router_host=""
 
           if [ -z "$preview" ]; then
             if [ "$strategy" = "branch" ] && [ "$mode" = "preview" ]; then
