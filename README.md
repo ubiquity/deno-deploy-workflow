@@ -7,7 +7,7 @@ This repository provides a standardized, reusable Deno Deploy workflow at `.gith
 - Supports Deno 2.x (default) with configurable versions.
 - Optional Node.js and Bun setup for builds (uses official install scripts).
 - Configurable install/build commands (multi-line supported).
-- Branch-aware deployments: production on specified branch (default: `development`), preview on others.
+- Branch-aware deployments: production on specified branch, branch-scoped previews on others (default strategy: `branch`; can be switched to shared preview mode).
 - Automatic preview project creation if missing.
 - Optional project existence check. `project_secrets` are forwarded as runtime env for the deploy (Deno Deploy secrets API is no longer supported).
 - Gitignore-based excludes with custom includes for build outputs.
@@ -55,6 +55,40 @@ Notes:
 - To opt out of PR comments, set `comment_pr: false` in `with:`.
 - `forward_all_secrets: true` (opt-in) forwards all available GitHub secrets as runtime env vars; defaults exclude `DENO_DEPLOY_TOKEN` and `GITHUB_TOKEN`.
 - Secrets managed in GitHub UI—update secret, next deploy forwards it.
+
+### Branch-specific preview domains + cleanup
+
+By default, previews are now generated per branch (instead of collapsing everything into `preview-<subdomain>.ubq.fi`).
+
+- Branch `feat/widget` for `pay-ubq-fi` resolves to project `feat-widget-pay-ubq-fi`
+- Router URL becomes `https://feat-widget-pay.ubq.fi`
+- If a branch slug is too long, it is trimmed and hash-suffixed to stay within Deno's 26-char project-name limit. If even a 6-char prefix cannot fit (i.e. base name is too long for any branch preview), the workflow automatically falls back to shared preview naming so the deployment still succeeds without requiring manual configuration.
+
+Optional input on the deploy reusable workflow:
+
+- `preview_strategy: branch` (default) — branch-scoped preview project/domain
+- `preview_strategy: shared` — legacy shared preview project/domain
+
+To clean up branch preview projects when branches are deleted, add a delete-triggered workflow in the consumer repo:
+
+```yaml
+name: Deno Deploy (cleanup preview project)
+
+on:
+  delete:
+
+jobs:
+  cleanup:
+    if: ${{ github.event.ref_type == 'branch' }}
+    uses: ubiquity/deno-deploy-workflow/.github/workflows/deno-deploy-preview-cleanup.yml@main
+    with:
+      project: <subdomain>-ubq-fi
+      ref_name: ${{ github.event.ref }}
+      prod_branch: development
+      preview_strategy: branch
+    secrets:
+      DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
+```
 
 ## Fork PR previews (artifact pipeline)
 
