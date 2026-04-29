@@ -964,8 +964,19 @@ jobs:
 
             sync_env_contexts() {
               env_key="$1"
-              if grep -Fxq "$env_key" "$tmp_build_keys" && ! grep -Fxq "$env_key" "$tmp_runtime_keys"; then
+              in_build=false
+              in_runtime=false
+              if grep -Fxq "$env_key" "$tmp_build_keys"; then
+                in_build=true
+              fi
+              if grep -Fxq "$env_key" "$tmp_runtime_keys"; then
+                in_runtime=true
+              fi
+
+              if [ "$in_build" = "true" ] && [ "$in_runtime" != "true" ]; then
                 deno deploy env update-contexts "$env_key" Build --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"
+              elif [ "$in_runtime" = "true" ] && [ "$in_build" != "true" ]; then
+                deno deploy env update-contexts "$env_key" Production Preview --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"
               else
                 deno deploy env update-contexts "$env_key" --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"
               fi
@@ -991,6 +1002,13 @@ jobs:
                   if not line or "=" not in line:
                       continue
                   key, value = line.split("=", 1)
+                  if key in values and values[key] != value:
+                      raise SystemExit(
+                          f"Conflicting Deno Deploy values for {key}: build_env and runtime_env "
+                          "use the same key with different values. The current deno deploy CLI "
+                          "cannot sync duplicate same-name app env vars across separate contexts; "
+                          "use distinct env names or the same value."
+                      )
                   if key not in values:
                       order.append(key)
                   values[key] = value
@@ -1096,14 +1114,48 @@ jobs:
               deploy_flags+=("--prod")
             fi
 
-            set +e
-            output=$(deno deploy "${deploy_flags[@]}" "$ROOT_DIR" 2>&1)
-            status=$?
-            set -e
-            echo "$output"
-            if [ $status -ne 0 ]; then
+            attempt=1
+            poll_sleep=60
+            start_time=$(date +%s)
+            # Leave a small buffer so verify/summary steps can complete before hitting the 6h Actions limit.
+            max_seconds=$(( 6 * 60 * 60 - 300 ))
+            while true; do
+              set +e
+              output=$(deno deploy "${deploy_flags[@]}" "$ROOT_DIR" 2>&1)
+              status=$?
+              set -e
+              if [ $status -eq 0 ]; then
+                echo "$output"
+                break
+              fi
+
+              now=$(date +%s)
+              elapsed=$(( now - start_time ))
+              remaining=$(( max_seconds - elapsed ))
+              if [ $remaining -le 0 ]; then
+                echo "::error::Deno Deploy transient error persisted for ~${elapsed}s; exhausted retry window (6h budget)"
+                echo "$output"
+                exit 1
+              fi
+
+              if printf '%s\n' "$output" | grep -Eqi '(too many deployments created per hour|rate limit|throttl|temporar|timeout|timed out|error reading a body from connection|connection reset|connection closed|network error|503|502|504)'; then
+                sleep_for=$poll_sleep
+                if printf '%s\n' "$output" | grep -qi "error reading a body from connection"; then
+                  sleep_for=10
+                fi
+                if [ $sleep_for -gt $remaining ]; then
+                  sleep_for=$remaining
+                fi
+                echo "::warning::Deno Deploy transient deploy failure (attempt ${attempt}); sleeping ${sleep_for}s (elapsed ${elapsed}s, remaining ${remaining}s)"
+                echo "$output"
+                sleep "$sleep_for"
+                attempt=$(( attempt + 1 ))
+                continue
+              fi
+
+              echo "$output"
               exit $status
-            fi
+            done
 
             project_url="https://${target}.${DENO_DEPLOY_ORG}.deno.net"
             deployment_url="$(printf '%s\n' "$output" | grep -oE 'https://[^[:space:]]+\.deno\.net' | tail -n 1 || true)"
