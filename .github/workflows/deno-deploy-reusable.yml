@@ -1077,6 +1077,33 @@ jobs:
               done <<< "$keys"
             }
 
+            deno_env_output=""
+            run_deno_env_command() {
+              deno_env_output=""
+              attempt=1
+              max_attempts=5
+              while true; do
+                set +e
+                deno_env_output="$("$@" 2>&1)"
+                status=$?
+                set -e
+                if [ $status -eq 0 ]; then
+                  return 0
+                fi
+
+                if printf '%s\n' "$deno_env_output" | grep -Eqi '(unexpected internal error|temporar|timeout|timed out|connection reset|connection closed|network error|rate limit|throttl|503|502|504)' && [ $attempt -lt $max_attempts ]; then
+                  sleep_for=$(( attempt * 5 ))
+                  echo "::warning::Deno Deploy env command failed transiently (attempt ${attempt}/${max_attempts}); retrying in ${sleep_for}s"
+                  echo "$deno_env_output"
+                  sleep "$sleep_for"
+                  attempt=$(( attempt + 1 ))
+                  continue
+                fi
+
+                return $status
+              done
+            }
+
             sync_env_contexts() {
               env_key="$1"
               in_build=false
@@ -1089,12 +1116,17 @@ jobs:
               fi
 
               if [ "$in_build" = "true" ] && [ "$in_runtime" != "true" ]; then
-                deno deploy env update-contexts "$env_key" Build --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"
+                run_deno_env_command deno deploy env update-contexts "$env_key" Build --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"
               elif [ "$in_runtime" = "true" ] && [ "$in_build" != "true" ]; then
-                deno deploy env update-contexts "$env_key" Production Preview --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"
+                run_deno_env_command deno deploy env update-contexts "$env_key" Production Preview --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"
               else
-                deno deploy env update-contexts "$env_key" --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"
+                run_deno_env_command deno deploy env update-contexts "$env_key" --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"
               fi
+              status=$?
+              if [ -n "$deno_env_output" ]; then
+                echo "$deno_env_output"
+              fi
+              return $status
             }
 
             # New Deno Deploy runs install/build remotely, so both build_env and
@@ -1137,10 +1169,12 @@ jobs:
                 env_key="${env_line%%=*}"
                 env_value="${env_line#*=}"
 
-                set +e
-                update_output="$(deno deploy env update-value "$env_key" "$env_value" --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project" 2>&1)"
-                update_status=$?
-                set -e
+                if run_deno_env_command deno deploy env update-value "$env_key" "$env_value" --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"; then
+                  update_status=0
+                else
+                  update_status=$?
+                fi
+                update_output="$deno_env_output"
                 if [ $update_status -eq 0 ]; then
                   echo "$update_output"
                   sync_env_contexts "$env_key"
@@ -1148,22 +1182,36 @@ jobs:
                 fi
 
                 if printf '%s\n' "$update_output" | grep -qi "not found"; then
-                  deno deploy env add "$env_key" "$env_value" --secret --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"
+                  if run_deno_env_command deno deploy env add "$env_key" "$env_value" --secret --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"; then
+                    echo "$deno_env_output"
+                  else
+                    status=$?
+                    echo "$deno_env_output"
+                    exit $status
+                  fi
                   sync_env_contexts "$env_key"
                 elif printf '%s\n' "$update_output" | grep -qi "unexpected internal error"; then
                   echo "::warning::Deno Deploy env update failed internally for $env_key; replacing the variable."
                   echo "$update_output"
 
-                  set +e
-                  delete_output="$(deno deploy env delete "$env_key" --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project" 2>&1)"
-                  delete_status=$?
-                  set -e
+                  if run_deno_env_command deno deploy env delete "$env_key" --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"; then
+                    delete_status=0
+                  else
+                    delete_status=$?
+                  fi
+                  delete_output="$deno_env_output"
                   if [ $delete_status -ne 0 ] && ! printf '%s\n' "$delete_output" | grep -qi "not found"; then
                     echo "$delete_output"
                     exit $delete_status
                   fi
                   [ -n "$delete_output" ] && echo "$delete_output"
-                  deno deploy env add "$env_key" "$env_value" --secret --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"
+                  if run_deno_env_command deno deploy env add "$env_key" "$env_value" --secret --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"; then
+                    echo "$deno_env_output"
+                  else
+                    status=$?
+                    echo "$deno_env_output"
+                    exit $status
+                  fi
                   sync_env_contexts "$env_key"
                 else
                   echo "$update_output"
