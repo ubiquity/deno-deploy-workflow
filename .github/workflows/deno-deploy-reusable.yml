@@ -895,12 +895,11 @@ jobs:
                 "--region=$DENO_DEPLOY_REGION"
                 "--no-wait"
               )
-              if [ -n "$INSTALL_COMMAND" ]; then
-                create_flags+=("--install-command=$INSTALL_COMMAND")
-              fi
-              if [ -n "$BUILD_COMMAND" ]; then
-                create_flags+=("--build-command=$BUILD_COMMAND")
-              fi
+              # The workflow prepares ROOT_DIR locally before uploading it.
+              # Keep the Deno app build config as no-op commands so Deno does not
+              # rerun local CI build scripts inside the remote builder.
+              create_flags+=("--install-command=true")
+              create_flags+=("--build-command=true")
 
               create_deno2_app() {
                 set +e
