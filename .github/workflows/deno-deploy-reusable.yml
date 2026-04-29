@@ -219,6 +219,21 @@ on:
         required: false
         type: boolean
         default: true
+      deno2_quota_gc:
+        description: Delete one generated Deno 2 preview/branch app and retry when app creation fails due to app quota
+        required: false
+        type: boolean
+        default: true
+      deno2_quota_gc_protected_apps:
+        description: Newline-separated Deno 2 app slugs that quota GC must never delete
+        required: false
+        type: string
+        default: ""
+      deno2_quota_gc_candidate_prefixes:
+        description: Newline-separated app slug prefixes that quota GC may delete
+        required: false
+        type: string
+        default: ""
       comment_pr:
         description: Post/update a deployment comment on pull requests
         required: false
@@ -301,6 +316,9 @@ jobs:
       BUILD_COMMAND: ${{ inputs.build_command }}
       INSTALL_COMMAND: ${{ inputs.install_command }}
       CREATE_PREVIEW: ${{ inputs.create_preview }}
+      DENO2_QUOTA_GC: ${{ inputs.deno2_quota_gc }}
+      DENO2_QUOTA_GC_PROTECTED_APPS: ${{ inputs.deno2_quota_gc_protected_apps }}
+      DENO2_QUOTA_GC_CANDIDATE_PREFIXES: ${{ inputs.deno2_quota_gc_candidate_prefixes }}
       VERIFY_URL: ${{ inputs.verify_url }}
       COMMENT_PR: ${{ inputs.comment_pr }}
       INDEX_HTML_PATH: ${{ inputs.index_html_path }}
@@ -549,8 +567,11 @@ jobs:
             target="$project"
           fi
 
-          echo "mode=$mode" >> "$GITHUB_OUTPUT"
-          echo "project=$target" >> "$GITHUB_OUTPUT"
+          {
+            echo "mode=$mode"
+            echo "project=$target"
+            echo "preview_project=$preview"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Export build env
         if: steps.preflight.outputs.deploy == 'yes' && env.BUILD_ENV != '' && env.ARTIFACT_NAME == ''
@@ -787,6 +808,7 @@ jobs:
         env:
           MODE: ${{ steps.target.outputs.mode }}
           TARGET_PROJECT: ${{ steps.target.outputs.project }}
+          RESOLVED_PREVIEW_PROJECT: ${{ steps.target.outputs.preview_project }}
         run: |
           set -euo pipefail
           project="${TARGET_PROJECT:-}"
@@ -880,7 +902,100 @@ jobs:
                 create_flags+=("--build-command=$BUILD_COMMAND")
               fi
 
-              deno deploy create "${create_flags[@]}" "$ROOT_DIR"
+              create_deno2_app() {
+                set +e
+                create_output="$(deno deploy create "${create_flags[@]}" "$ROOT_DIR" 2>&1)"
+                create_status=$?
+                set -e
+                printf '%s\n' "$create_output"
+                return "$create_status"
+              }
+
+              looks_like_app_quota_error() {
+                printf '%s\n' "$1" |
+                  grep -Eqi '(^|[^[:alnum:]_])APP_LIMIT_EXCEEDED([^[:alnum:]_]|$)'
+              }
+
+              run_deno2_quota_gc() {
+                if [ "${DENO2_QUOTA_GC:-true}" != "true" ]; then
+                  echo "::warning::Deno 2 quota GC is disabled; not deleting any apps."
+                  return 1
+                fi
+
+                echo "Attempting Deno 2 quota GC before retrying app creation."
+                # shellcheck disable=SC2016
+                GC_TARGET_APP="$project" \
+                GC_PROJECT="${PROJECT:-}" \
+                GC_PREVIEW_PROJECT="${RESOLVED_PREVIEW_PROJECT:-${PREVIEW_PROJECT:-}}" \
+                GC_PROTECTED_APPS="$DENO2_QUOTA_GC_PROTECTED_APPS" \
+                GC_CANDIDATE_PREFIXES="$DENO2_QUOTA_GC_CANDIDATE_PREFIXES" \
+                deno eval '
+                  import process from "node:process";
+
+                  const { Client } = await import("jsr:@deno/sandbox@0.12.0");
+
+                  const lines = (value) =>
+                    (value ?? "")
+                      .split(/\r?\n/)
+                      .map((line) => line.trim())
+                      .filter(Boolean);
+
+                  const target = process.env.GC_TARGET_APP ?? "";
+                  const project = process.env.GC_PROJECT ?? "";
+                  const previewProject = process.env.GC_PREVIEW_PROJECT ?? "";
+                  const deployOrg = process.env.DENO_DEPLOY_ORG;
+                  const protectedApps = new Set([
+                    target,
+                    project,
+                    previewProject,
+                    ...lines(process.env.GC_PROTECTED_APPS),
+                  ].filter(Boolean));
+                  const candidatePrefixes = lines(process.env.GC_CANDIDATE_PREFIXES);
+                  const generatedSuffix = /^(codex|pr|pull|branch|b)(?:-|$)/;
+                  const generatedAfterUosApp = /-ubq-fi-(codex|pr-|pull-|branch-|b-)/;
+
+                  function isGeneratedCandidate(slug) {
+                    if (!slug || protectedApps.has(slug)) return false;
+                    if (candidatePrefixes.some((prefix) => prefix && slug.startsWith(prefix))) return true;
+                    if (project && slug.startsWith(`${project}-`)) {
+                      const suffix = slug.slice(project.length + 1);
+                      return generatedSuffix.test(suffix);
+                    }
+                    return generatedAfterUosApp.test(slug) || /^pr-\d+-/.test(slug) || /-pr-\d+(?:-|$)/.test(slug);
+                  }
+
+                  const client = new Client(deployOrg ? { org: deployOrg } : {});
+                  const apps = [];
+                  for await (const app of await client.apps.list()) {
+                    apps.push(app);
+                  }
+
+                  const candidates = apps
+                    .filter((app) => isGeneratedCandidate(app.slug))
+                    .sort((a, b) => {
+                      const updated = new Date(a.updated_at).getTime() - new Date(b.updated_at).getTime();
+                      return updated || a.slug.localeCompare(b.slug);
+                    });
+
+                  if (candidates.length === 0) {
+                    console.log("No generated Deno 2 app candidates matched quota GC rules.");
+                    Deno.exit(2);
+                  }
+
+                  const victim = candidates[0];
+                  await client.apps.delete(victim.slug);
+                  console.log(`Deleted generated Deno 2 app ${victim.slug} (${victim.id}); updated_at=${victim.updated_at}`);
+                '
+              }
+
+              if ! create_deno2_app; then
+                if looks_like_app_quota_error "$create_output"; then
+                  run_deno2_quota_gc
+                  create_deno2_app
+                else
+                  exit "$create_status"
+                fi
+              fi
             else
               echo "::error::Failed to inspect Deno Deploy app $project"
               printf '%s\n' "$probe_output"

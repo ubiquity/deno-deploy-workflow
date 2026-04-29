@@ -65,7 +65,29 @@ Notes:
 - Set `bun_version`/`node_version` and commands for repos with builds. If you use Bun, prefer `bun_version: 1.3.x` (latest as of Dec 2025) instead of older 1.2.x pins.
 - To opt out of PR comments, set `comment_pr: false` in `with:`.
 - `forward_all_secrets: true` (opt-in) forwards all available GitHub secrets as runtime env vars; defaults exclude `DENO_DEPLOY_TOKEN` and `GITHUB_TOKEN`.
+- In Deno 2 mode, quota GC is enabled by default only after app creation fails with an app quota/limit error. It deletes one generated preview/branch app, then retries creation once. Production apps, the current target app, and explicitly protected apps are never deleted.
 - Secrets managed in GitHub UI—update secret, next deploy forwards it.
+
+### Deno 2 Quota GC
+
+Deno Deploy Free plans currently allow a small number of apps, so branch/PR apps can exhaust capacity. The workflow keeps old previews unless a new app cannot be created because of an app quota/limit error.
+
+Defaults:
+- `deno2_quota_gc: true`
+- Protects the current production app, current preview app, and target app.
+- Deletes only generated-looking apps, such as `<base>-ubq-fi-codex-*`, `<base>-ubq-fi-pr-*`, `<base>-ubq-fi-branch-*`, or slugs under configured candidate prefixes.
+- Deletes the oldest candidate by `updated_at`, only one app per failed creation attempt.
+
+For custom branch app naming, pass explicit candidate prefixes and any app slugs that must never be deleted:
+
+```yaml
+with:
+  deno2_quota_gc_candidate_prefixes: |
+    ai-ubq-fi-
+  deno2_quota_gc_protected_apps: |
+    ai-ubq-fi
+    p-ai-ubq-fi
+```
 
 ## Fork PR previews (artifact pipeline)
 
