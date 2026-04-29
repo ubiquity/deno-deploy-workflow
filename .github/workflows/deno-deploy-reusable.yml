@@ -981,6 +981,20 @@ jobs:
 
                 if printf '%s\n' "$update_output" | grep -qi "not found"; then
                   deno deploy env add "$env_key" "$env_value" --secret --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"
+                elif printf '%s\n' "$update_output" | grep -qi "unexpected internal error"; then
+                  echo "::warning::Deno Deploy env update failed internally for $env_key; replacing the variable."
+                  echo "$update_output"
+
+                  set +e
+                  delete_output="$(deno deploy env delete "$env_key" --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project" 2>&1)"
+                  delete_status=$?
+                  set -e
+                  if [ $delete_status -ne 0 ] && ! printf '%s\n' "$delete_output" | grep -qi "not found"; then
+                    echo "$delete_output"
+                    exit $delete_status
+                  fi
+                  [ -n "$delete_output" ] && echo "$delete_output"
+                  deno deploy env add "$env_key" "$env_value" --secret --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"
                 else
                   echo "$update_output"
                   exit $update_status
