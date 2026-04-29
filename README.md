@@ -5,6 +5,7 @@ This repository provides a standardized, reusable Deno Deploy workflow at `.gith
 ## What it does
 
 - Supports Deno 2.x (default) with configurable versions.
+- Supports new Deno Deploy (`deno deploy`, `.deno.net`) via `deploy_platform: deno2`; Deploy Classic (`deployctl`, `.deno.dev`) remains the default during migration.
 - Optional Node.js and Bun setup for builds (uses official install scripts).
 - Configurable install/build commands (multi-line supported).
 - Branch-aware deployments: production on specified branch (default: `development`), preview on others.
@@ -48,7 +49,17 @@ jobs:
 ```
 
 Notes:
-- Use `project_secrets` to forward env vars to the deployment (`SECRET_NAME=ENV_VAR` per line). They are not persisted on Deno Deploy; if you need persistence, set them in the Deploy dashboard.
+- For Deno 2 / new Deno Deploy, set `deploy_platform: deno2` and prefer Deno-native commands:
+  ```yaml
+  with:
+    project: <subdomain>-ubq-fi
+    deploy_platform: deno2
+    entrypoint: serve.ts
+    install_command: deno install
+    build_command: deno task build
+  ```
+  The workflow creates the app with `deno deploy create`, syncs build/runtime env with `deno deploy env load`, deploys with `deno deploy`, and emits `.deno.net` URLs.
+- Use `project_secrets` to forward env vars to the deployment (`SECRET_NAME=ENV_VAR` per line). In Deno 2 mode these are synced as app env before deployment; in Deploy Classic they are forwarded for the current deploy only.
 - Org-level secrets (`SUPABASE_URL`, `SUPABASE_ANON_KEY`) are shared; no repo-specific copies needed.
 - Customize `include` for build output dirs (e.g., `static/dist/**`).
 - Set `bun_version`/`node_version` and commands for repos with builds. If you use Bun, prefer `bun_version: 1.3.x` (latest as of Dec 2025) instead of older 1.2.x pins.

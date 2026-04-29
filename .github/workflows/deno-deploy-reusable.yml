@@ -14,7 +14,7 @@ on:
         type: string
         default: ""
       entrypoint:
-        description: Entrypoint file passed to deployctl (relative to root)
+        description: Entrypoint file passed to Deno Deploy (relative to root)
         required: true
         type: string
       root:
@@ -43,10 +43,35 @@ on:
         type: string
         default: v2.x
       deployctl_version:
-        description: deployctl version to install
+        description: deployctl version to install for Deploy Classic
         required: false
         type: string
         default: "1.13.1"
+      deploy_platform:
+        description: Deployment backend. Use "classic" for deployctl/.deno.dev or "deno2" for deno deploy/.deno.net.
+        required: false
+        type: string
+        default: classic
+      deno_org:
+        description: Deno Deploy organization name for deploy_platform=deno2
+        required: false
+        type: string
+        default: ubiquity-dao
+      deno_region:
+        description: Deno Deploy region for app creation when deploy_platform=deno2
+        required: false
+        type: string
+        default: global
+      deno_build_timeout:
+        description: Deno Deploy build timeout in minutes for deploy_platform=deno2
+        required: false
+        type: string
+        default: "5"
+      deno_build_memory_limit:
+        description: Deno Deploy build memory in MB for deploy_platform=deno2
+        required: false
+        type: string
+        default: "1024"
       install_command:
         description: Optional install command (multi-line allowed)
         required: false
@@ -68,12 +93,12 @@ on:
         type: string
         default: ""
       include:
-        description: Newline-separated include globs for deployctl
+        description: Newline-separated include globs for deployctl/artifact packaging
         required: false
         type: string
         default: ""
       exclude:
-        description: Newline-separated exclude globs for deployctl
+        description: Newline-separated exclude globs for deployctl/artifact packaging
         required: false
         type: string
         default: |
@@ -284,6 +309,11 @@ jobs:
       DEBUG_FETCH_FAIL: ${{ inputs.debug_fetch_fail }}
       DENO_VERSION: ${{ inputs.deno_version }}
       DEPLOYCTL_VERSION: ${{ inputs.deployctl_version }}
+      DEPLOY_PLATFORM: ${{ inputs.deploy_platform }}
+      DENO_DEPLOY_ORG: ${{ inputs.deno_org }}
+      DENO_DEPLOY_REGION: ${{ inputs.deno_region }}
+      DENO_BUILD_TIMEOUT: ${{ inputs.deno_build_timeout }}
+      DENO_BUILD_MEMORY_LIMIT: ${{ inputs.deno_build_memory_limit }}
       NODE_VERSION: ${{ inputs.node_version }}
       BUN_VERSION: ${{ inputs.bun_version }}
       DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
@@ -418,6 +448,7 @@ jobs:
           if command -v bun >/dev/null 2>&1; then bun --version; fi
 
       - name: Install deployctl
+        if: env.DEPLOY_PLATFORM == 'classic'
         run: |
           set -euo pipefail
           deno install -gArf jsr:@deno/deployctl@${{ env.DEPLOYCTL_VERSION }}
@@ -427,6 +458,18 @@ jobs:
         id: preflight
         run: |
           set -euo pipefail
+          case "${DEPLOY_PLATFORM:-classic}" in
+            classic|deno2) ;;
+            *)
+              echo "::error::deploy_platform must be 'classic' or 'deno2'. Got: ${DEPLOY_PLATFORM}"
+              exit 1
+              ;;
+          esac
+          if [ "${DEPLOY_PLATFORM:-classic}" = "deno2" ] && [ -z "${DENO_DEPLOY_ORG:-}" ]; then
+            echo "::error::deno_org is required when deploy_platform=deno2"
+            exit 1
+          fi
+
           missing=()
           while IFS= read -r key; do
             key=$(echo "$key" | tr -d '\r' | xargs)
@@ -758,6 +801,177 @@ jobs:
             secrets_block="$PREVIEW_PROJECT_SECRETS"
           fi
 
+          if [ -n "$secrets_block" ]; then
+            if [ "${DEPLOY_PLATFORM:-classic}" = "classic" ]; then
+              echo "::warning::project_secrets persistence via dash.deno.com API is no longer supported; forwarding these as runtime env for this deploy only."
+            else
+              echo "Syncing project_secrets mappings as Deno Deploy app env."
+            fi
+
+            extra_runtime=""
+            while IFS= read -r line; do
+              line=$(echo "$line" | tr -d '\r' | xargs)
+              [ -z "$line" ] && continue
+              if ! printf '%s\n' "$line" | grep -q '='; then
+                echo "::warning::project_secrets line missing '=': $line"
+                continue
+              fi
+              secret_name=${line%%=*}
+              env_key=${line#*=}
+              if [ -z "$secret_name" ] || [ -z "$env_key" ]; then
+                echo "::warning::project_secrets line invalid: $line"
+                continue
+              fi
+              val="${!env_key:-}"
+              if [ -z "$val" ]; then
+                echo "::warning::Secret $secret_name skipped because env $env_key is empty"
+                continue
+              fi
+              echo "::add-mask::$val"
+              extra_runtime+=$'\n'"${secret_name}=${val}"
+            done <<< "$secrets_block"
+
+            if [ -n "$extra_runtime" ]; then
+              combined="$(printf '%s\n' "$RUNTIME_ENV" "$extra_runtime" | tr -d '\r' | sed '/^$/d')"
+              {
+                echo "RUNTIME_ENV<<EOF"
+                echo "$combined"
+                echo "EOF"
+              } >> "$GITHUB_ENV"
+              RUNTIME_ENV="$combined"
+            fi
+          fi
+
+          if [ "${DEPLOY_PLATFORM:-classic}" = "deno2" ]; then
+            set +e
+            probe_output="$(deno deploy env list --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project" 2>&1)"
+            probe_status=$?
+            set -e
+
+            if [ $probe_status -eq 0 ]; then
+              echo "Deno Deploy app $project already exists."
+            elif printf '%s\n' "$probe_output" | grep -qi "not found"; then
+              if [ "$ENSURE_PROJECT" != "true" ]; then
+                echo "::error::Deno Deploy app $project not found and ensure_project is false"
+                printf '%s\n' "$probe_output"
+                exit 1
+              fi
+
+              create_flags=(
+                "--token=$DENO_DEPLOY_TOKEN"
+                "--org=$DENO_DEPLOY_ORG"
+                "--app=$project"
+                "--source=local"
+                "--do-not-use-detected-build-config"
+                "--app-directory=."
+                "--runtime-mode=dynamic"
+                "--entrypoint=$ENTRYPOINT"
+                "--working-directory=."
+                "--pre-deploy-command=true"
+                "--build-timeout=$DENO_BUILD_TIMEOUT"
+                "--build-memory-limit=$DENO_BUILD_MEMORY_LIMIT"
+                "--region=$DENO_DEPLOY_REGION"
+                "--no-wait"
+              )
+              if [ -n "$INSTALL_COMMAND" ]; then
+                create_flags+=("--install-command=$INSTALL_COMMAND")
+              fi
+              if [ -n "$BUILD_COMMAND" ]; then
+                create_flags+=("--build-command=$BUILD_COMMAND")
+              fi
+
+              deno deploy create "${create_flags[@]}" "$ROOT_DIR"
+            else
+              echo "::error::Failed to inspect Deno Deploy app $project"
+              printf '%s\n' "$probe_output"
+              exit $probe_status
+            fi
+
+            tmp_env="$(mktemp)"
+            trap 'rm -f "$tmp_env"' EXIT
+
+            append_env_block() {
+              block="$1"
+              source_name="$2"
+              [ -z "$block" ] && return 0
+              resolved="$(printf '%s\n' "$block" | envsubst)"
+              while IFS= read -r line; do
+                line=$(printf '%s' "$line" | tr -d '\r')
+                [ -z "$line" ] && continue
+                if ! printf '%s\n' "$line" | grep -q '='; then
+                  echo "::warning::${source_name} line missing '=': $line"
+                  continue
+                fi
+                key="${line%%=*}"
+                value="${line#*=}"
+                if ! printf '%s\n' "$key" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*$'; then
+                  echo "::warning::${source_name} key is not a valid env name: $key"
+                  continue
+                fi
+                if [ -z "$value" ]; then
+                  echo "::warning::${source_name} env $key is empty; skipping"
+                  continue
+                fi
+                echo "::add-mask::$value"
+                printf '%s=%s\n' "$key" "$value" >> "$tmp_env"
+              done <<< "$resolved"
+            }
+
+            append_env_keys() {
+              keys="$1"
+              [ -z "$keys" ] && return 0
+              while IFS= read -r key; do
+                key=$(echo "$key" | tr -d '\r' | xargs)
+                [ -z "$key" ] && continue
+                if ! printf '%s\n' "$key" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*$'; then
+                  echo "::warning::env_var_keys key is not a valid env name: $key"
+                  continue
+                fi
+                value="${!key:-}"
+                if [ -z "$value" ]; then
+                  echo "::warning::Requested env $key for deploy but it is empty"
+                  continue
+                fi
+                echo "::add-mask::$value"
+                printf '%s=%s\n' "$key" "$value" >> "$tmp_env"
+              done <<< "$keys"
+            }
+
+            # New Deno Deploy runs install/build remotely, so both build_env and
+            # runtime_env must be persisted to the app before the final deploy.
+            append_env_block "$BUILD_ENV" "build_env"
+            append_env_block "$RUNTIME_ENV" "runtime_env"
+            append_env_keys "$RUNTIME_ENV_KEYS"
+
+            if [ -s "$tmp_env" ]; then
+              dedup_env="$(mktemp)"
+              TMP_ENV="$tmp_env" python - <<'PY' > "$dedup_env"
+          import os
+
+          path = os.environ["TMP_ENV"]
+          values = {}
+          order = []
+          with open(path, "r", encoding="utf-8") as handle:
+              for raw in handle:
+                  line = raw.rstrip("\n")
+                  if not line or "=" not in line:
+                      continue
+                  key, value = line.split("=", 1)
+                  if key not in values:
+                      order.append(key)
+                  values[key] = value
+
+          for key in order:
+              print(f"{key}={values[key]}")
+          PY
+              mv "$dedup_env" "$tmp_env"
+              deno deploy env load "$tmp_env" --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"
+            else
+              echo "No Deno Deploy app env to sync."
+            fi
+            exit 0
+          fi
+
           if [ "$ENSURE_PROJECT" != "true" ] && [ -z "$secrets_block" ]; then
             echo "Skipping project ensure/secret sync (disabled and no secrets provided)"
             exit 0
@@ -793,41 +1007,6 @@ jobs:
           fi
           rm -f "$tmp_resp"
 
-          if [ -n "$secrets_block" ]; then
-            echo "::warning::project_secrets persistence via dash.deno.com API is no longer supported; forwarding these as runtime env for this deploy only."
-            extra_runtime=""
-            while IFS= read -r line; do
-              line=$(echo "$line" | tr -d '\r' | xargs)
-              [ -z "$line" ] && continue
-              if ! printf '%s\n' "$line" | grep -q '='; then
-                echo "::warning::project_secrets line missing '=': $line"
-                continue
-              fi
-              secret_name=${line%%=*}
-              env_key=${line#*=}
-              if [ -z "$secret_name" ] || [ -z "$env_key" ]; then
-                echo "::warning::project_secrets line invalid: $line"
-                continue
-              fi
-              val="${!env_key:-}"
-              if [ -z "$val" ]; then
-                echo "::warning::Secret $secret_name skipped because env $env_key is empty"
-                continue
-              fi
-              echo "::add-mask::$val"
-              extra_runtime+=$'\n'"${secret_name}=${val}"
-            done <<< "$secrets_block"
-
-            if [ -n "$extra_runtime" ]; then
-              combined="$(printf '%s\n' "$RUNTIME_ENV" "$extra_runtime" | tr -d '\r' | sed '/^$/d')"
-              {
-                echo "RUNTIME_ENV<<EOF"
-                echo "$combined"
-                echo "EOF"
-              } >> "$GITHUB_ENV"
-            fi
-          fi
-
       - name: Deploy to Deno Deploy
         if: steps.preflight.outputs.deploy == 'yes'
         id: deploy
@@ -835,6 +1014,39 @@ jobs:
           set -euo pipefail
           mode='${{ steps.target.outputs.mode }}'
           target='${{ steps.target.outputs.project }}'
+
+          if [ "${DEPLOY_PLATFORM:-classic}" = "deno2" ]; then
+            deploy_flags=(
+              "--token=$DENO_DEPLOY_TOKEN"
+              "--org=$DENO_DEPLOY_ORG"
+              "--app=$target"
+            )
+            if [ "$mode" = "production" ]; then
+              deploy_flags+=("--prod")
+            fi
+
+            set +e
+            output=$(deno deploy "${deploy_flags[@]}" "$ROOT_DIR" 2>&1)
+            status=$?
+            set -e
+            echo "$output"
+            if [ $status -ne 0 ]; then
+              exit $status
+            fi
+
+            project_url="https://${target}.${DENO_DEPLOY_ORG}.deno.net"
+            deployment_url="$(printf '%s\n' "$output" | grep -oE 'https://[^[:space:]]+\.deno\.net' | tail -n 1 || true)"
+            if [ "$mode" = "production" ] || [ -z "$deployment_url" ]; then
+              deployment_url="$project_url"
+            fi
+
+            {
+              echo "deployment_url=$deployment_url"
+              echo "project=$target"
+              echo "mode=$mode"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           deploy_flags=(
             "--project=$target"
@@ -973,7 +1185,11 @@ jobs:
           prod_project="${PROJECT:-}"
           deployment_url="${DEPLOYMENT_URL:-}"
 
-          project_url="https://${target_project}.deno.dev"
+          if [ "${DEPLOY_PLATFORM:-classic}" = "deno2" ]; then
+            project_url="https://${target_project}.${DENO_DEPLOY_ORG}.deno.net"
+          else
+            project_url="https://${target_project}.deno.dev"
+          fi
           router_url=""
 
           base=""
@@ -1011,8 +1227,8 @@ jobs:
           SHA: ${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha || github.sha }}
           TARGET_PROJECT: ${{ steps.deploy.outputs.project }}
           MODE: ${{ steps.deploy.outputs.mode }}
-          DEPLOYMENT_URL: ${{ steps.deployed_url.outputs.deployment_url || format('https://{0}.deno.dev', steps.deploy.outputs.project) }}
-          PROJECT_URL: ${{ steps.deployed_url.outputs.project_url || format('https://{0}.deno.dev', steps.deploy.outputs.project) }}
+          DEPLOYMENT_URL: ${{ steps.deployed_url.outputs.deployment_url || '' }}
+          PROJECT_URL: ${{ steps.deployed_url.outputs.project_url || '' }}
         run: |
           set -euo pipefail
           marker="<!-- deno-deploy-preview -->"
@@ -1555,7 +1771,13 @@ jobs:
         run: |
           set -euo pipefail
           url='${{ steps.deployed_url.outputs.deployment_url }}'
-          if [ -z "$url" ]; then url="https://${{ steps.deploy.outputs.project }}.deno.dev"; fi
+          if [ -z "$url" ]; then
+            if [ "${DEPLOY_PLATFORM:-classic}" = "deno2" ]; then
+              url="https://${{ steps.deploy.outputs.project }}.${DENO_DEPLOY_ORG}.deno.net"
+            else
+              url="https://${{ steps.deploy.outputs.project }}.deno.dev"
+            fi
+          fi
           codes_ok="200"
           status="fail"
           http_code="000"
@@ -1578,7 +1800,13 @@ jobs:
         run: |
           set -euo pipefail
           base='${{ steps.deployed_url.outputs.deployment_url }}'
-          if [ -z "$base" ]; then base="https://${{ steps.deploy.outputs.project }}.deno.dev"; fi
+          if [ -z "$base" ]; then
+            if [ "${DEPLOY_PLATFORM:-classic}" = "deno2" ]; then
+              base="https://${{ steps.deploy.outputs.project }}.${DENO_DEPLOY_ORG}.deno.net"
+            else
+              base="https://${{ steps.deploy.outputs.project }}.deno.dev"
+            fi
+          fi
           ok_codes="200 301 302 304 308"
           # Retry a few times for transient deployctl/edge blips (occasionally returns 5xx/000 right after deploy).
           retryable_codes="000 404 429 500 502 503 504 599"
@@ -1648,6 +1876,7 @@ jobs:
           {
             echo "### Deno Deploy"
             echo ""
+            echo "- Platform: ${DEPLOY_PLATFORM:-classic}"
             echo "- Mode: ${mode:-unknown}"
             echo "- Project: ${project}"
             if [ -n "$router_url" ]; then echo "- Router URL: ${router_url}"; fi
