@@ -890,11 +890,26 @@ jobs:
             tmp_env="$(mktemp)"
             trap 'rm -f "$tmp_env"' EXIT
 
+            resolve_env_value() {
+              raw_value="$1"
+              if printf '%s\n' "$raw_value" | grep -Eq '^\$[A-Za-z_][A-Za-z0-9_]*$'; then
+                ref_key="${raw_value#\$}"
+                printf '%s' "${!ref_key:-}"
+                return 0
+              fi
+              if printf '%s\n' "$raw_value" | grep -Eq '^\$\{[A-Za-z_][A-Za-z0-9_]*\}$'; then
+                ref_key="${raw_value#\$\{}"
+                ref_key="${ref_key%\}}"
+                printf '%s' "${!ref_key:-}"
+                return 0
+              fi
+              printf '%s' "$raw_value"
+            }
+
             append_env_block() {
               block="$1"
               source_name="$2"
               [ -z "$block" ] && return 0
-              resolved="$(printf '%s\n' "$block" | envsubst)"
               while IFS= read -r line; do
                 line=$(printf '%s' "$line" | tr -d '\r')
                 [ -z "$line" ] && continue
@@ -908,13 +923,14 @@ jobs:
                   echo "::warning::${source_name} key is not a valid env name: $key"
                   continue
                 fi
+                value="$(resolve_env_value "$value")"
                 if [ -z "$value" ]; then
                   echo "::warning::${source_name} env $key is empty; skipping"
                   continue
                 fi
                 echo "::add-mask::$value"
                 printf '%s=%s\n' "$key" "$value" >> "$tmp_env"
-              done <<< "$resolved"
+              done <<< "$block"
             }
 
             append_env_keys() {
