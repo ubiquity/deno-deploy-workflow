@@ -916,7 +916,7 @@ jobs:
 
               looks_like_app_quota_error() {
                 printf '%s\n' "$1" |
-                  grep -Eqi '(^|[^[:alnum:]_])APP_LIMIT_EXCEEDED([^[:alnum:]_]|$)'
+                  grep -Eqi '(^|[^[:alnum:]_])APP_LIMIT_EXCEEDED([^[:alnum:]_]|$)|exceeded the app limit'
               }
 
               run_deno2_quota_gc() {
