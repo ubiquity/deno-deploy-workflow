@@ -888,7 +888,9 @@ jobs:
             fi
 
             tmp_env="$(mktemp)"
-            trap 'rm -f "$tmp_env"' EXIT
+            tmp_build_keys="$(mktemp)"
+            tmp_runtime_keys="$(mktemp)"
+            trap 'rm -f "$tmp_env" "$tmp_build_keys" "$tmp_runtime_keys"' EXIT
 
             resolve_env_value() {
               raw_value="$1"
@@ -909,6 +911,7 @@ jobs:
             append_env_block() {
               block="$1"
               source_name="$2"
+              context="$3"
               [ -z "$block" ] && return 0
               while IFS= read -r line; do
                 line=$(printf '%s' "$line" | tr -d '\r')
@@ -930,6 +933,11 @@ jobs:
                 fi
                 echo "::add-mask::$value"
                 printf '%s=%s\n' "$key" "$value" >> "$tmp_env"
+                if [ "$context" = "build" ]; then
+                  printf '%s\n' "$key" >> "$tmp_build_keys"
+                else
+                  printf '%s\n' "$key" >> "$tmp_runtime_keys"
+                fi
               done <<< "$block"
             }
 
@@ -950,13 +958,23 @@ jobs:
                 fi
                 echo "::add-mask::$value"
                 printf '%s=%s\n' "$key" "$value" >> "$tmp_env"
+                printf '%s\n' "$key" >> "$tmp_runtime_keys"
               done <<< "$keys"
+            }
+
+            sync_env_contexts() {
+              env_key="$1"
+              if grep -Fxq "$env_key" "$tmp_build_keys" && ! grep -Fxq "$env_key" "$tmp_runtime_keys"; then
+                deno deploy env update-contexts "$env_key" Build --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"
+              else
+                deno deploy env update-contexts "$env_key" --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"
+              fi
             }
 
             # New Deno Deploy runs install/build remotely, so both build_env and
             # runtime_env must be persisted to the app before the final deploy.
-            append_env_block "$BUILD_ENV" "build_env"
-            append_env_block "$RUNTIME_ENV" "runtime_env"
+            append_env_block "$BUILD_ENV" "build_env" "build"
+            append_env_block "$RUNTIME_ENV" "runtime_env" "runtime"
             append_env_keys "$RUNTIME_ENV_KEYS"
 
             if [ -s "$tmp_env" ]; then
@@ -992,11 +1010,13 @@ jobs:
                 set -e
                 if [ $update_status -eq 0 ]; then
                   echo "$update_output"
+                  sync_env_contexts "$env_key"
                   continue
                 fi
 
                 if printf '%s\n' "$update_output" | grep -qi "not found"; then
                   deno deploy env add "$env_key" "$env_value" --secret --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"
+                  sync_env_contexts "$env_key"
                 elif printf '%s\n' "$update_output" | grep -qi "unexpected internal error"; then
                   echo "::warning::Deno Deploy env update failed internally for $env_key; replacing the variable."
                   echo "$update_output"
@@ -1011,6 +1031,7 @@ jobs:
                   fi
                   [ -n "$delete_output" ] && echo "$delete_output"
                   deno deploy env add "$env_key" "$env_value" --secret --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"
+                  sync_env_contexts "$env_key"
                 else
                   echo "$update_output"
                   exit $update_status
