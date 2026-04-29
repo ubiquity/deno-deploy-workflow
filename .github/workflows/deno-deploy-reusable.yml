@@ -519,8 +519,8 @@ jobs:
         run: |
           set -euo pipefail
           project="${PROJECT:-}"
-          if [[ "$project" != *-ubq-fi ]]; then
-            echo "::error::Project name must end with '-ubq-fi' to match router mapping. Got: $project"
+          if [ "$project" != "ubq-fi" ] && [[ "$project" != *-ubq-fi ]]; then
+            echo "::error::Project name must be 'ubq-fi' or end with '-ubq-fi' to match router mapping. Got: $project"
             exit 1
           fi
           if ! [[ "$project" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
@@ -534,14 +534,18 @@ jobs:
 
           preview="${PREVIEW_PROJECT:-}"
           if [ -z "$preview" ]; then
-            base="${project%-ubq-fi}"
-            # Clamp base to keep preview <=26 with prefix/suffix: p- + base + -ubq-fi
-            if [ ${#base} -gt 17 ]; then
-              # 12 chars + dash + 4-char hash = 17
-              hash=$(printf '%s' "$base" | sha1sum | cut -c1-4)
-              base="${base:0:12}-${hash}"
+            if [ "$project" = "ubq-fi" ]; then
+              preview="p-ubq-fi"
+            else
+              base="${project%-ubq-fi}"
+              # Clamp base to keep preview <=26 with prefix/suffix: p- + base + -ubq-fi
+              if [ ${#base} -gt 17 ]; then
+                # 12 chars + dash + 4-char hash = 17
+                hash=$(printf '%s' "$base" | sha1sum | cut -c1-4)
+                base="${base:0:12}-${hash}"
+              fi
+              preview="p-${base}-ubq-fi"
             fi
-            preview="p-${base}-ubq-fi"
           fi
 
           if [ ${#preview} -gt 26 ]; then
@@ -1478,7 +1482,11 @@ jobs:
           router_url=""
 
           base=""
-          if [[ "$prod_project" == *-ubq-fi ]]; then
+          if [ "$prod_project" = "ubq-fi" ]; then
+            if [ "$mode" = "production" ]; then
+              router_url="https://ubq.fi"
+            fi
+          elif [[ "$prod_project" == *-ubq-fi ]]; then
             base="${prod_project%-ubq-fi}"
           fi
 
