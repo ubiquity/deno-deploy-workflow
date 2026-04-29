@@ -965,7 +965,27 @@ jobs:
               print(f"{key}={values[key]}")
           PY
               mv "$dedup_env" "$tmp_env"
-              deno deploy env load "$tmp_env" --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"
+              while IFS= read -r env_line; do
+                [ -z "$env_line" ] && continue
+                env_key="${env_line%%=*}"
+                env_value="${env_line#*=}"
+
+                set +e
+                update_output="$(deno deploy env update-value "$env_key" "$env_value" --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project" 2>&1)"
+                update_status=$?
+                set -e
+                if [ $update_status -eq 0 ]; then
+                  echo "$update_output"
+                  continue
+                fi
+
+                if printf '%s\n' "$update_output" | grep -qi "not found"; then
+                  deno deploy env add "$env_key" "$env_value" --secret --token "$DENO_DEPLOY_TOKEN" --org "$DENO_DEPLOY_ORG" --app "$project"
+                else
+                  echo "$update_output"
+                  exit $update_status
+                fi
+              done < "$tmp_env"
             else
               echo "No Deno Deploy app env to sync."
             fi
