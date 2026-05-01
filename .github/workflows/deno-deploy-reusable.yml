@@ -9,7 +9,7 @@ on:
         type: string
         default: ""
       preview_project:
-        description: Optional preview project name (defaults to "preview-<project>")
+        description: Optional preview project name override. When empty, non-production branches deploy to deterministic branch-specific projects.
         required: false
         type: string
         default: ""
@@ -513,9 +513,12 @@ jobs:
         id: target
         env:
           REF_NAME: ${{ github.ref_name }}
+          HEAD_REF: ${{ github.head_ref || '' }}
           EVENT_NAME: ${{ github.event_name }}
           WORKFLOW_EVENT: ${{ github.event.workflow_run.event || '' }}
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch || '' }}
+          DELETE_REF: ${{ github.event.ref || '' }}
+          DELETE_REF_TYPE: ${{ github.event.ref_type || '' }}
         run: |
           set -euo pipefail
           project="${PROJECT:-}"
@@ -532,20 +535,51 @@ jobs:
             exit 1
           fi
 
-          preview="${PREVIEW_PROJECT:-}"
-          if [ -z "$preview" ]; then
+          ref_name="${REF_NAME:-}"
+          if [ "$EVENT_NAME" = "pull_request" ] && [ -n "$HEAD_REF" ]; then
+            ref_name="$HEAD_REF"
+          elif [ "$EVENT_NAME" = "workflow_run" ] && [ -n "$HEAD_BRANCH" ]; then
+            ref_name="$HEAD_BRANCH"
+          elif [ "$EVENT_NAME" = "delete" ] && [ "$DELETE_REF_TYPE" = "branch" ] && [ -n "$DELETE_REF" ]; then
+            ref_name="$DELETE_REF"
+          fi
+
+          slugify_ref() {
+            printf '%s' "$1" |
+              tr '[:upper:]' '[:lower:]' |
+              sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//; s/-+/-/g'
+          }
+
+          branch_project_for_ref() {
+            ref="$1"
+            branch_slug="$(slugify_ref "$ref")"
+            if [ -z "$branch_slug" ]; then
+              branch_slug="branch"
+            fi
+
             if [ "$project" = "ubq-fi" ]; then
-              preview="p-ubq-fi"
+              base="ubq"
             else
               base="${project%-ubq-fi}"
-              # Clamp base to keep preview <=26 with prefix/suffix: p- + base + -ubq-fi
-              if [ ${#base} -gt 17 ]; then
-                # 12 chars + dash + 4-char hash = 17
-                hash=$(printf '%s' "$base" | sha1sum | cut -c1-4)
-                base="${base:0:12}-${hash}"
-              fi
-              preview="p-${base}-ubq-fi"
             fi
+
+            branch_base="${branch_slug}-${base}"
+            # Deno Deploy project names are capped at 26 chars. Keep the required
+            # -ubq-fi router suffix and add a short hash when truncation is needed
+            # so branches like feat/widget and feat-widget do not collide silently.
+            max_base_len=$(( 26 - 7 ))
+            if [ ${#branch_base} -gt $max_base_len ]; then
+              hash=$(printf '%s' "$ref" | sha1sum | cut -c1-4)
+              prefix_len=$(( max_base_len - 5 ))
+              branch_base="${branch_base:0:$prefix_len}-${hash}"
+              branch_base="$(printf '%s' "$branch_base" | sed -E 's/-+$//')"
+            fi
+            printf '%s-ubq-fi' "$branch_base"
+          }
+
+          preview="${PREVIEW_PROJECT:-}"
+          if [ -z "$preview" ]; then
+            preview="$(branch_project_for_ref "$ref_name")"
           fi
 
           if [ ${#preview} -gt 26 ]; then
@@ -556,15 +590,23 @@ jobs:
             echo "::error::Preview project name must be DNS-safe (lowercase letters, numbers, hyphens; no leading/trailing hyphen). Got: $preview"
             exit 1
           fi
-
-          ref_name="${REF_NAME:-}"
-          if [ "$EVENT_NAME" = "workflow_run" ] && [ -n "$HEAD_BRANCH" ]; then
-            ref_name="$HEAD_BRANCH"
+          if [ "$preview" != "ubq-fi" ] && [[ "$preview" != *-ubq-fi ]]; then
+            echo "::error::Preview project name must be 'ubq-fi' or end with '-ubq-fi' to match router mapping. Got: $preview"
+            exit 1
           fi
 
           mode="preview"
           target="$preview"
-          if [ "$EVENT_NAME" = "workflow_run" ] && [ "$WORKFLOW_EVENT" = "pull_request" ]; then
+          if [ "$EVENT_NAME" = "delete" ] && [ "$DELETE_REF_TYPE" = "branch" ]; then
+            if [ "$ref_name" = "$PROD_BRANCH" ]; then
+              echo "Deleted branch is the production branch; refusing to clean up production project $project."
+              mode="production"
+              target="$project"
+            else
+              mode="cleanup"
+              target="$preview"
+            fi
+          elif [ "$EVENT_NAME" = "workflow_run" ] && [ "$WORKFLOW_EVENT" = "pull_request" ]; then
             :
           elif [ "$ref_name" = "$PROD_BRANCH" ]; then
             mode="production"
@@ -575,16 +617,73 @@ jobs:
             echo "mode=$mode"
             echo "project=$target"
             echo "preview_project=$preview"
+            echo "ref_name=$ref_name"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Clean up deleted branch project
+        if: steps.preflight.outputs.deploy == 'yes' && steps.target.outputs.mode == 'cleanup'
+        env:
+          TARGET_PROJECT: ${{ steps.target.outputs.project }}
+          DELETED_BRANCH: ${{ steps.target.outputs.ref_name }}
+        run: |
+          set -euo pipefail
+          project="${TARGET_PROJECT:-}"
+          if [ -z "$project" ]; then
+            echo "::error::No branch preview project resolved for cleanup"
+            exit 1
+          fi
+          echo "Deleting Deno Deploy project/app ${project} for deleted branch ${DELETED_BRANCH}"
+
+          if [ "${DEPLOY_PLATFORM:-classic}" = "deno2" ]; then
+            deno eval \
+              --allow-env=DENO_DEPLOY_ORG,DENO_DEPLOY_TOKEN,TARGET_PROJECT \
+              --allow-net=api.deno.com \
+              '
+                import process from "node:process";
+                const { Client } = await import("jsr:@deno/sandbox@0.12.0");
+                const app = process.env.TARGET_PROJECT;
+                const org = process.env.DENO_DEPLOY_ORG;
+                if (!app) throw new Error("TARGET_PROJECT is required");
+                const client = new Client(org ? { org } : {});
+                try {
+                  await client.apps.delete(app);
+                  console.log(`Deleted Deno Deploy app ${app}`);
+                } catch (error) {
+                  const message = String(error?.message ?? error);
+                  if (/not found/i.test(message)) {
+                    console.log(`Deno Deploy app ${app} did not exist; cleanup is complete.`);
+                  } else {
+                    throw error;
+                  }
+                }
+              '
+            exit 0
+          fi
+
+          tmp_resp="$(mktemp)"
+          http_code=$(curl -sS -o "$tmp_resp" -w "%{http_code}" \
+            -X DELETE \
+            -H "Authorization: Bearer $DENO_DEPLOY_TOKEN" \
+            "https://dash.deno.com/api/projects/$project" || echo "000")
+          if [ "$http_code" = "404" ]; then
+            echo "Deno Deploy project $project did not exist; cleanup is complete."
+          elif [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+            echo "Deleted Deno Deploy project $project"
+          else
+            echo "::error::Failed to delete Deno Deploy project $project (HTTP $http_code)"
+            cat "$tmp_resp" || true
+            exit 1
+          fi
+          rm -f "$tmp_resp"
+
       - name: Export build env
-        if: steps.preflight.outputs.deploy == 'yes' && env.BUILD_ENV != '' && env.ARTIFACT_NAME == ''
+        if: steps.preflight.outputs.deploy == 'yes' && steps.target.outputs.mode != 'cleanup' && env.BUILD_ENV != '' && env.ARTIFACT_NAME == ''
         run: |
           set -euo pipefail
           printf '%s\n' "$BUILD_ENV" | envsubst >> "$GITHUB_ENV"
 
       - name: Validate Supabase env
-        if: steps.preflight.outputs.deploy == 'yes'
+        if: steps.preflight.outputs.deploy == 'yes' && steps.target.outputs.mode != 'cleanup'
         run: |
           set -euo pipefail
           if [ -z "${SUPABASE_URL:-}" ] || [ -z "${SUPABASE_ANON_KEY:-}" ]; then
@@ -597,19 +696,19 @@ jobs:
           fi
 
       - name: Install dependencies
-        if: steps.preflight.outputs.deploy == 'yes' && env.INSTALL_COMMAND != '' && env.ARTIFACT_NAME == ''
+        if: steps.preflight.outputs.deploy == 'yes' && steps.target.outputs.mode != 'cleanup' && env.INSTALL_COMMAND != '' && env.ARTIFACT_NAME == ''
         run: |
           set -euo pipefail
           printf '%s\n' "$INSTALL_COMMAND" | bash
 
       - name: Build
-        if: steps.preflight.outputs.deploy == 'yes' && env.BUILD_COMMAND != '' && env.ARTIFACT_NAME == ''
+        if: steps.preflight.outputs.deploy == 'yes' && steps.target.outputs.mode != 'cleanup' && env.BUILD_COMMAND != '' && env.ARTIFACT_NAME == ''
         run: |
           set -euo pipefail
           printf '%s\n' "$BUILD_COMMAND" | bash
 
       - name: "Guard: unresolved env placeholders"
-        if: steps.preflight.outputs.deploy == 'yes'
+        if: steps.preflight.outputs.deploy == 'yes' && steps.target.outputs.mode != 'cleanup'
         run: |
           set -euo pipefail
           collect_keys() {
@@ -661,7 +760,7 @@ jobs:
           fi
 
       - name: Resolve index.html path
-        if: steps.preflight.outputs.deploy == 'yes'
+        if: steps.preflight.outputs.deploy == 'yes' && steps.target.outputs.mode != 'cleanup'
         run: |
           set -euo pipefail
           requested="${INDEX_HTML_PATH:-}"
@@ -710,7 +809,7 @@ jobs:
           fi
 
       - name: Build debug fetch paths
-        if: steps.preflight.outputs.deploy == 'yes'
+        if: steps.preflight.outputs.deploy == 'yes' && steps.target.outputs.mode != 'cleanup'
         run: |
           set -euo pipefail
           manual_paths="${DEBUG_FETCH_PATHS_INPUT:-}"
@@ -750,7 +849,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Forward all GitHub secrets (runtime)
-        if: steps.preflight.outputs.deploy == 'yes' && env.FORWARD_ALL_SECRETS == 'true'
+        if: steps.preflight.outputs.deploy == 'yes' && steps.target.outputs.mode != 'cleanup' && env.FORWARD_ALL_SECRETS == 'true'
         env:
           ALL_SECRETS_JSON: ${{ toJson(secrets) }}
         run: |
@@ -808,7 +907,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Ensure project exists and sync secrets
-        if: steps.preflight.outputs.deploy == 'yes'
+        if: steps.preflight.outputs.deploy == 'yes' && steps.target.outputs.mode != 'cleanup'
         env:
           MODE: ${{ steps.target.outputs.mode }}
           TARGET_PROJECT: ${{ steps.target.outputs.project }}
@@ -1263,7 +1362,7 @@ jobs:
           rm -f "$tmp_resp"
 
       - name: Deploy to Deno Deploy
-        if: steps.preflight.outputs.deploy == 'yes'
+        if: steps.preflight.outputs.deploy == 'yes' && steps.target.outputs.mode != 'cleanup'
         id: deploy
         run: |
           set -euo pipefail
@@ -1461,7 +1560,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Compute deployed URLs
-        if: steps.preflight.outputs.deploy == 'yes'
+        if: steps.preflight.outputs.deploy == 'yes' && steps.target.outputs.mode != 'cleanup'
         id: deployed_url
         env:
           MODE: ${{ steps.deploy.outputs.mode }}
@@ -1493,6 +1592,9 @@ jobs:
           if [ -n "$base" ]; then
             if [ "$mode" = "production" ]; then
               router_url="https://${base}.ubq.fi"
+            elif [[ "$target_project" == *-ubq-fi ]]; then
+              router_base="${target_project%-ubq-fi}"
+              router_url="https://${router_base}.ubq.fi"
             else
               router_url="https://preview-${base}.ubq.fi"
             fi
@@ -1510,7 +1612,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Comment deployment URL on PR
-        if: steps.preflight.outputs.deploy == 'yes' && env.COMMENT_PR == 'true' && steps.deploy.outputs.mode == 'preview' && (github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_run')
+        if: steps.preflight.outputs.deploy == 'yes' && steps.target.outputs.mode != 'cleanup' && env.COMMENT_PR == 'true' && steps.deploy.outputs.mode == 'preview' && (github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_run')
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -2058,7 +2160,7 @@ jobs:
           rm -f "$tmp_resp"
 
       - name: Verify deployment
-        if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true'
+        if: steps.preflight.outputs.deploy == 'yes' && steps.target.outputs.mode != 'cleanup' && env.VERIFY_URL == 'true'
         id: verify
         continue-on-error: true
         run: |
@@ -2089,7 +2191,7 @@ jobs:
           fi
 
       - name: Debug fetch paths (optional)
-        if: steps.preflight.outputs.deploy == 'yes' && env.DEBUG_FETCH_PATHS != ''
+        if: steps.preflight.outputs.deploy == 'yes' && steps.target.outputs.mode != 'cleanup' && env.DEBUG_FETCH_PATHS != ''
         run: |
           set -euo pipefail
           base='${{ steps.deployed_url.outputs.deployment_url }}'
@@ -2157,7 +2259,7 @@ jobs:
           fi
 
       - name: Summary
-        if: steps.preflight.outputs.deploy == 'yes'
+        if: steps.preflight.outputs.deploy == 'yes' && steps.target.outputs.mode != 'cleanup'
         run: |
           mode='${{ steps.deploy.outputs.mode }}'
           project='${{ steps.deploy.outputs.project }}'
@@ -2182,7 +2284,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Fail on probe failure
-        if: steps.preflight.outputs.deploy == 'yes' && env.VERIFY_URL == 'true'
+        if: steps.preflight.outputs.deploy == 'yes' && steps.target.outputs.mode != 'cleanup' && env.VERIFY_URL == 'true'
         run: |
           status='${{ steps.verify.outputs.status || '' }}'
           http='${{ steps.verify.outputs.http_code || '' }}'

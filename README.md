@@ -8,8 +8,8 @@ This repository provides a standardized, reusable Deno Deploy workflow at `.gith
 - Supports new Deno Deploy (`deno deploy`, `.deno.net`) via `deploy_platform: deno2`; Deploy Classic (`deployctl`, `.deno.dev`) remains the default during migration.
 - Optional Node.js and Bun setup for builds (uses official install scripts).
 - Configurable install/build commands (multi-line supported).
-- Branch-aware deployments: production on specified branch (default: `development`), preview on others.
-- Automatic preview project creation if missing.
+- Branch-aware deployments: production on specified branch (default: `development`), branch-specific preview projects on others (for example `feat/widget` -> `feat-widget-pay-ubq-fi` / `https://feat-widget-pay.ubq.fi`).
+- Branch deletion cleanup: when a caller runs this reusable workflow from a `delete` branch event, the matching branch-specific Deno Deploy project/app is deleted to avoid preview pollution and app-limit exhaustion.
 - Optional project existence check. `project_secrets` are forwarded as runtime env for the deploy (Deno Deploy secrets API is no longer supported).
 - Gitignore-based excludes with custom includes for build outputs.
 - Runtime env var forwarding (preferred over env_var_keys for simplicity).
@@ -27,6 +27,7 @@ name: Deno Deploy
 on:
   push:
   pull_request:
+  delete:
   workflow_dispatch:
 
 jobs:
@@ -64,6 +65,8 @@ Notes:
 - Customize `include` for build output dirs (e.g., `static/dist/**`).
 - Set `bun_version`/`node_version` and commands for repos with builds. If you use Bun, prefer `bun_version: 1.3.x` (latest as of Dec 2025) instead of older 1.2.x pins.
 - To opt out of PR comments, set `comment_pr: false` in `with:`.
+- `preview_project` is now an explicit override. Leave it empty for branch-specific preview projects; setting it keeps the previous single-preview-project behavior.
+- To clean up branch preview projects, include `delete:` in the caller workflow triggers. Branch deletion resolves the same branch-specific project name and deletes it; production-branch deletes are refused.
 - `forward_all_secrets: true` (opt-in) forwards all available GitHub secrets as runtime env vars; defaults exclude `DENO_DEPLOY_TOKEN` and `GITHUB_TOKEN`.
 - In Deno 2 mode, quota GC is enabled by default only after app creation fails with an app quota/limit error. It deletes one generated preview/branch app, then retries creation once. Production apps, the current target app, and explicitly protected apps are never deleted.
 - Secrets managed in GitHub UI—update secret, next deploy forwards it.
