@@ -13,6 +13,11 @@ on:
         required: false
         type: string
         default: ""
+      preview_strategy:
+        description: Preview naming strategy when preview_project is not provided (branch|shared)
+        required: false
+        type: string
+        default: branch
       entrypoint:
         description: Entrypoint file passed to Deno Deploy (relative to root)
         required: true
@@ -292,6 +297,7 @@ jobs:
       PROD_BRANCH: ${{ inputs.prod_branch != '' && inputs.prod_branch || github.event.repository.default_branch }}
       PROJECT: ${{ inputs.project }}
       PREVIEW_PROJECT: ${{ inputs.preview_project }}
+      PREVIEW_STRATEGY: ${{ inputs.preview_strategy }}
       ENTRYPOINT: ${{ inputs.entrypoint }}
       ROOT_DIR: ${{ inputs.root }}
       ARTIFACT_NAME: ${{ inputs.artifact_name }}
@@ -513,11 +519,75 @@ jobs:
         id: target
         env:
           REF_NAME: ${{ github.ref_name }}
+          HEAD_REF: ${{ github.head_ref || '' }}
           EVENT_NAME: ${{ github.event_name }}
           WORKFLOW_EVENT: ${{ github.event.workflow_run.event || '' }}
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch || '' }}
         run: |
           set -euo pipefail
+
+          slugify() {
+            printf '%s' "$1" \
+              | tr '[:upper:]' '[:lower:]' \
+              | sed -E 's#[^a-z0-9]+#-#g; s#-+#-#g; s#^-+##; s#-+$##'
+          }
+
+          shorten_slug() {
+            value="$1"
+            max_len="$2"
+            [ ${#value} -le "$max_len" ] && {
+              printf '%s' "$value"
+              return 0
+            }
+            hash=$(printf '%s' "$value" | sha1sum | cut -c1-4)
+            head_len=$((max_len - 5))
+            printf '%s-%s' "${value:0:${head_len}}" "$hash"
+          }
+
+          branch_preview_name() {
+            project_name="$1"
+            ref_name="$2"
+
+            base="${project_name%-ubq-fi}"
+            if [ "$project_name" = "ubq-fi" ]; then
+              base="ubq"
+            fi
+
+            branch_slug="$(slugify "$ref_name")"
+            base_slug="$(slugify "$base")"
+            [ -n "$branch_slug" ] || branch_slug="preview"
+            [ -n "$base_slug" ] || base_slug="ubq"
+
+            suffix="-ubq-fi"
+            available=$((26 - ${#suffix}))
+            separator_len=1
+            min_branch_len=6
+            min_base_len=6
+
+            branch_len=${#branch_slug}
+            base_len=${#base_slug}
+            if [ $((branch_len + separator_len + base_len)) -gt "$available" ]; then
+              base_budget=$((available - separator_len - min_branch_len))
+              if [ "$base_budget" -lt "$min_base_len" ]; then
+                base_budget="$min_base_len"
+              fi
+              if [ "$base_budget" -gt "$base_len" ]; then
+                base_budget="$base_len"
+              fi
+
+              branch_budget=$((available - separator_len - base_budget))
+              if [ "$branch_budget" -lt "$min_branch_len" ]; then
+                branch_budget="$min_branch_len"
+                base_budget=$((available - separator_len - branch_budget))
+              fi
+
+              base_slug="$(shorten_slug "$base_slug" "$base_budget")"
+              branch_slug="$(shorten_slug "$branch_slug" "$branch_budget")"
+            fi
+
+            printf '%s-%s-ubq-fi\n' "$branch_slug" "$base_slug"
+          }
+
           project="${PROJECT:-}"
           if [ "$project" != "ubq-fi" ] && [[ "$project" != *-ubq-fi ]]; then
             echo "::error::Project name must be 'ubq-fi' or end with '-ubq-fi' to match router mapping. Got: $project"
@@ -533,8 +603,36 @@ jobs:
           fi
 
           preview="${PREVIEW_PROJECT:-}"
+          preview_strategy="${PREVIEW_STRATEGY:-branch}"
+          branch_preview=false
+          case "$preview_strategy" in
+            branch|shared) ;;
+            *)
+              echo "::error::preview_strategy must be 'branch' or 'shared'. Got: $preview_strategy"
+              exit 1
+              ;;
+          esac
+
+          ref_name="${REF_NAME:-}"
+          if [ "$EVENT_NAME" = "pull_request" ] && [ -n "$HEAD_REF" ]; then
+            ref_name="$HEAD_REF"
+          fi
+          if [ "$EVENT_NAME" = "workflow_run" ] && [ -n "$HEAD_BRANCH" ]; then
+            ref_name="$HEAD_BRANCH"
+          fi
+
+          mode="preview"
+          if [ "$EVENT_NAME" = "workflow_run" ] && [ "$WORKFLOW_EVENT" = "pull_request" ]; then
+            :
+          elif [ "$ref_name" = "$PROD_BRANCH" ]; then
+            mode="production"
+          fi
+
           if [ -z "$preview" ]; then
-            if [ "$project" = "ubq-fi" ]; then
+            if [ "$preview_strategy" = "branch" ] && [ "$mode" = "preview" ]; then
+              preview="$(branch_preview_name "$project" "$ref_name")"
+              branch_preview=true
+            elif [ "$project" = "ubq-fi" ]; then
               preview="p-ubq-fi"
             else
               base="${project%-ubq-fi}"
@@ -557,24 +655,26 @@ jobs:
             exit 1
           fi
 
-          ref_name="${REF_NAME:-}"
-          if [ "$EVENT_NAME" = "workflow_run" ] && [ -n "$HEAD_BRANCH" ]; then
-            ref_name="$HEAD_BRANCH"
-          fi
-
-          mode="preview"
           target="$preview"
-          if [ "$EVENT_NAME" = "workflow_run" ] && [ "$WORKFLOW_EVENT" = "pull_request" ]; then
-            :
-          elif [ "$ref_name" = "$PROD_BRANCH" ]; then
-            mode="production"
+          router_host=""
+          if [ "$mode" = "production" ]; then
             target="$project"
+            if [ "$project" = "ubq-fi" ]; then
+              router_host="ubq.fi"
+            else
+              router_host="${project%-ubq-fi}.ubq.fi"
+            fi
+          elif [ "$branch_preview" = "true" ]; then
+            router_host="${preview%-ubq-fi}.ubq.fi"
+          elif [ "$project" != "ubq-fi" ]; then
+            router_host="preview-${project%-ubq-fi}.ubq.fi"
           fi
 
           {
             echo "mode=$mode"
             echo "project=$target"
             echo "preview_project=$preview"
+            echo "router_host=$router_host"
           } >> "$GITHUB_OUTPUT"
 
       - name: Export build env
@@ -1467,6 +1567,7 @@ jobs:
           MODE: ${{ steps.deploy.outputs.mode }}
           TARGET_PROJECT: ${{ steps.deploy.outputs.project }}
           DEPLOYMENT_URL: ${{ steps.deploy.outputs.deployment_url || '' }}
+          ROUTER_HOST: ${{ steps.target.outputs.router_host || '' }}
         run: |
           set -euo pipefail
           mode="${MODE:-}"
@@ -1481,20 +1582,30 @@ jobs:
           fi
           router_url=""
 
-          base=""
-          if [ "$prod_project" = "ubq-fi" ]; then
-            if [ "$mode" = "production" ]; then
-              router_url="https://ubq.fi"
+          if [ -n "${ROUTER_HOST:-}" ]; then
+            router_url="https://${ROUTER_HOST}"
+          else
+            base=""
+            if [ "$prod_project" = "ubq-fi" ]; then
+              if [ "$mode" = "production" ]; then
+                router_url="https://ubq.fi"
+              fi
+            elif [[ "$prod_project" == *-ubq-fi ]]; then
+              base="${prod_project%-ubq-fi}"
             fi
-          elif [[ "$prod_project" == *-ubq-fi ]]; then
-            base="${prod_project%-ubq-fi}"
+
+            if [ -n "$base" ]; then
+              if [ "$mode" = "production" ]; then
+                router_url="https://${base}.ubq.fi"
+              else
+                router_url="https://preview-${base}.ubq.fi"
+              fi
+            fi
           fi
 
-          if [ -n "$base" ]; then
+          if [ -z "$router_url" ] && [ -n "$prod_project" ] && [ "$mode" = "production" ]; then
             if [ "$mode" = "production" ]; then
-              router_url="https://${base}.ubq.fi"
-            else
-              router_url="https://preview-${base}.ubq.fi"
+              router_url="https://${prod_project}.deno.dev"
             fi
           fi
 

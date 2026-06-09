@@ -1,0 +1,203 @@
+name: Reusable - Deno Deploy Preview Cleanup
+
+on:
+  workflow_call:
+    inputs:
+      project:
+        description: Production Deno Deploy project name
+        required: true
+        type: string
+      ref_name:
+        description: Deleted branch ref name
+        required: true
+        type: string
+      preview_project:
+        description: Explicit preview project name to delete
+        required: false
+        type: string
+        default: ""
+      preview_strategy:
+        description: Preview naming strategy when preview_project is not provided (branch|shared)
+        required: false
+        type: string
+        default: branch
+      prod_branch:
+        description: Production branch name
+        required: false
+        type: string
+        default: ""
+    secrets:
+      DENO_DEPLOY_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    name: Delete preview project
+    runs-on: ubuntu-22.04
+    env:
+      PROJECT: ${{ inputs.project }}
+      REF_NAME: ${{ inputs.ref_name }}
+      PREVIEW_PROJECT: ${{ inputs.preview_project }}
+      PREVIEW_STRATEGY: ${{ inputs.preview_strategy }}
+      PROD_BRANCH: ${{ inputs.prod_branch != '' && inputs.prod_branch || github.event.repository.default_branch }}
+      DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
+    steps:
+      - name: Determine preview project
+        id: target
+        run: |
+          set -euo pipefail
+
+          slugify() {
+            printf '%s' "$1" \
+              | tr '[:upper:]' '[:lower:]' \
+              | sed -E 's#[^a-z0-9]+#-#g; s#-+#-#g; s#^-+##; s#-+$##'
+          }
+
+          shorten_slug() {
+            value="$1"
+            max_len="$2"
+            [ ${#value} -le "$max_len" ] && {
+              printf '%s' "$value"
+              return 0
+            }
+            hash=$(printf '%s' "$value" | sha1sum | cut -c1-4)
+            head_len=$((max_len - 5))
+            printf '%s-%s' "${value:0:${head_len}}" "$hash"
+          }
+
+          branch_preview_name() {
+            project_name="$1"
+            ref_name="$2"
+
+            base="${project_name%-ubq-fi}"
+            if [ "$project_name" = "ubq-fi" ]; then
+              base="ubq"
+            fi
+
+            branch_slug="$(slugify "$ref_name")"
+            base_slug="$(slugify "$base")"
+            [ -n "$branch_slug" ] || branch_slug="preview"
+            [ -n "$base_slug" ] || base_slug="ubq"
+
+            suffix="-ubq-fi"
+            available=$((26 - ${#suffix}))
+            separator_len=1
+            min_branch_len=6
+            min_base_len=6
+
+            branch_len=${#branch_slug}
+            base_len=${#base_slug}
+            if [ $((branch_len + separator_len + base_len)) -gt "$available" ]; then
+              base_budget=$((available - separator_len - min_branch_len))
+              if [ "$base_budget" -lt "$min_base_len" ]; then
+                base_budget="$min_base_len"
+              fi
+              if [ "$base_budget" -gt "$base_len" ]; then
+                base_budget="$base_len"
+              fi
+
+              branch_budget=$((available - separator_len - base_budget))
+              if [ "$branch_budget" -lt "$min_branch_len" ]; then
+                branch_budget="$min_branch_len"
+                base_budget=$((available - separator_len - branch_budget))
+              fi
+
+              base_slug="$(shorten_slug "$base_slug" "$base_budget")"
+              branch_slug="$(shorten_slug "$branch_slug" "$branch_budget")"
+            fi
+
+            printf '%s-%s-ubq-fi\n' "$branch_slug" "$base_slug"
+          }
+
+          project="${PROJECT:-}"
+          if [ "$project" != "ubq-fi" ] && [[ "$project" != *-ubq-fi ]]; then
+            echo "::error::Project name must be 'ubq-fi' or end with '-ubq-fi'. Got: $project"
+            exit 1
+          fi
+          if ! [[ "$project" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+            echo "::error::Project name must be DNS-safe. Got: $project"
+            exit 1
+          fi
+
+          ref_name="${REF_NAME:-}"
+          if [ -z "$ref_name" ]; then
+            echo "::notice::Empty ref_name, skipping cleanup"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$ref_name" = "$PROD_BRANCH" ]; then
+            echo "::notice::Deleted ref matches production branch (${PROD_BRANCH}), skipping cleanup"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          target="${PREVIEW_PROJECT:-}"
+          strategy="${PREVIEW_STRATEGY:-branch}"
+          case "$strategy" in
+            branch|shared) ;;
+            *)
+              echo "::error::preview_strategy must be 'branch' or 'shared'. Got: $strategy"
+              exit 1
+              ;;
+          esac
+
+          if [ -z "$target" ]; then
+            if [ "$strategy" = "branch" ]; then
+              target="$(branch_preview_name "$project" "$ref_name")"
+            elif [ "$project" = "ubq-fi" ]; then
+              target="p-ubq-fi"
+            else
+              base="${project%-ubq-fi}"
+              if [ ${#base} -gt 17 ]; then
+                hash=$(printf '%s' "$base" | sha1sum | cut -c1-4)
+                base="${base:0:12}-${hash}"
+              fi
+              target="p-${base}-ubq-fi"
+            fi
+          fi
+
+          if [ "$target" = "$project" ]; then
+            echo "::error::Refusing to delete production project '${project}' via preview cleanup"
+            exit 1
+          fi
+          if [ ${#target} -gt 26 ]; then
+            echo "::error::Preview project name '${target}' exceeds 26 characters"
+            exit 1
+          fi
+          if ! [[ "$target" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+            echo "::error::Preview project name must be DNS-safe. Got: $target"
+            exit 1
+          fi
+
+          {
+            echo "skip=false"
+            echo "project=$target"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Delete preview project
+        if: steps.target.outputs.skip != 'true'
+        env:
+          TARGET_PROJECT: ${{ steps.target.outputs.project }}
+        run: |
+          set -euo pipefail
+          api="https://dash.deno.com/api/projects/${TARGET_PROJECT}"
+          code=$(curl -sS -o /tmp/delete-preview-project.json -w "%{http_code}" -X DELETE \
+            -H "Authorization: Bearer ${DENO_DEPLOY_TOKEN}" \
+            "$api" || echo "000")
+
+          if [ "$code" = "404" ]; then
+            echo "Preview project ${TARGET_PROJECT} already removed"
+            exit 0
+          fi
+
+          if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+            echo "::error::Failed to delete preview project ${TARGET_PROJECT} (HTTP ${code})"
+            cat /tmp/delete-preview-project.json || true
+            exit 1
+          fi
+
+          echo "Deleted preview project ${TARGET_PROJECT}"

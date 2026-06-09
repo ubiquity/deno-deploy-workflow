@@ -8,7 +8,7 @@ This repository provides a standardized, reusable Deno Deploy workflow at `.gith
 - Supports new Deno Deploy (`deno deploy`, `.deno.net`) via `deploy_platform: deno2`; Deploy Classic (`deployctl`, `.deno.dev`) remains the default during migration.
 - Optional Node.js and Bun setup for builds (uses official install scripts).
 - Configurable install/build commands (multi-line supported).
-- Branch-aware deployments: production on specified branch (default: `development`), preview on others.
+- Branch-aware deployments: production on specified branch (default: `development`), branch-scoped preview projects on others.
 - Automatic preview project creation if missing.
 - Optional project existence check. `project_secrets` are forwarded as runtime env for the deploy (Deno Deploy secrets API is no longer supported).
 - Gitignore-based excludes with custom includes for build outputs.
@@ -67,6 +67,42 @@ Notes:
 - `forward_all_secrets: true` (opt-in) forwards all available GitHub secrets as runtime env vars; defaults exclude `DENO_DEPLOY_TOKEN` and `GITHUB_TOKEN`.
 - In Deno 2 mode, quota GC is enabled by default only after app creation fails with an app quota/limit error. It deletes one generated preview/branch app, then retries creation once. Production apps, the current target app, and explicitly protected apps are never deleted.
 - Secrets managed in GitHub UI—update secret, next deploy forwards it.
+
+### Branch preview projects
+
+Preview deployments use branch-scoped project names by default:
+
+- Branch `feat/widget` for project `pay-ubq-fi` deploys to `feat-widget-pay-ubq-fi`.
+- The router URL becomes `https://feat-widget-pay.ubq.fi`.
+- Long branch or base names are shortened with a short hash so the project name stays within Deno Deploy's 26-character limit while still remaining branch-specific.
+
+Set `preview_strategy: shared` to keep the legacy shared preview project:
+
+```yaml
+with:
+  project: pay-ubq-fi
+  preview_strategy: shared
+```
+
+To clean up branch preview projects when a branch is deleted, add a delete-triggered workflow in the consumer repo:
+
+```yaml
+name: Deno Deploy Preview Cleanup
+
+on:
+  delete:
+
+jobs:
+  cleanup:
+    if: ${{ github.event.ref_type == 'branch' }}
+    uses: ubiquity/deno-deploy-workflow/.github/workflows/deno-deploy-preview-cleanup.yml@main
+    with:
+      project: pay-ubq-fi
+      ref_name: ${{ github.event.ref }}
+      prod_branch: development
+    secrets:
+      DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
+```
 
 ### Deno 2 Quota GC
 
