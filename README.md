@@ -61,7 +61,7 @@ Notes:
   The workflow creates the app with `deno deploy create`, syncs build/runtime env with `deno deploy env load`, deploys with `deno deploy`, and emits `.deno.net` URLs.
 - Use `project_secrets` to forward env vars to the deployment (`SECRET_NAME=ENV_VAR` per line). In Deno 2 mode these are synced as app env before deployment; in Deploy Classic they are forwarded for the current deploy only.
 - Org-level secrets (`SUPABASE_URL`, `SUPABASE_ANON_KEY`) are shared; no repo-specific copies needed.
-- Customize `include` for build output dirs (e.g., `static/dist/**`).
+- Customize `include` for build output dirs (e.g., `static/**` when `index.html` lives under `static/`).
 - Set `bun_version`/`node_version` and commands for repos with builds. If you use Bun, prefer `bun_version: 1.3.x` (latest as of Dec 2025) instead of older 1.2.x pins.
 - To opt out of PR comments, set `comment_pr: false` in `with:`.
 - `forward_all_secrets: true` (opt-in) forwards all available GitHub secrets as runtime env vars; defaults exclude `DENO_DEPLOY_TOKEN` and `GITHUB_TOKEN`.

@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+## Normalize a branch or project segment into a DNS-safe slug.
 slugify() {
   printf '%s' "$1" \
     | tr '[:upper:]' '[:lower:]' \
     | sed -E 's#[^a-z0-9]+#-#g; s#-+#-#g; s#^-+##; s#-+$##'
 }
 
+## Shorten an already-normalized slug while keeping a stable hash suffix.
 shorten_slug() {
   value="$1"
   max_len="$2"
@@ -19,6 +21,7 @@ shorten_slug() {
   printf '%s-%s' "${value:0:${head_len}}" "$hash"
 }
 
+## Build the Deno Deploy preview project name for a branch and base project.
 branch_preview_name() {
   project_name="$1"
   ref_name="$2"
@@ -63,6 +66,7 @@ branch_preview_name() {
   printf '%s-%s-ubq-fi\n' "$branch_slug" "$base_slug"
 }
 
+## Assert that two strings match and print a TAP-style failure on mismatch.
 assert_eq() {
   expected="$1"
   actual="$2"
@@ -73,6 +77,7 @@ assert_eq() {
   fi
 }
 
+## Assert that a generated Deno Deploy project name satisfies platform limits.
 assert_valid_project() {
   value="$1"
   label="$2"
