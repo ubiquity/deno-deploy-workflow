@@ -1304,7 +1304,7 @@ jobs:
                 exit 1
               fi
 
-              if printf '%s\n' "$output" | grep -Eqi '(too many deployments created per hour|rate limit|throttl|temporar|timeout|timed out|error reading a body from connection|connection reset|connection closed|network error|503|502|504)'; then
+              if printf '%s\n' "$output" | grep -Eqi '(too many deployments created per hour|rate limit|throttl|temporar|timeout|timed out|error reading a body from connection|file upload did not reach the builder|build service could not complete the request|connection reset|connection closed|network error|503|502|504)'; then
                 sleep_for=$poll_sleep
                 if printf '%s\n' "$output" | grep -qi "error reading a body from connection"; then
                   sleep_for=10
