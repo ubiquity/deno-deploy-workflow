@@ -1,0 +1,26 @@
+name: Branch preview
+description: Resolve an isolated branch preview and delete it when its branch is removed
+inputs:
+  project:
+    description: Production project name (ubq-fi or a name ending in -ubq-fi)
+    required: true
+  prod_branch:
+    description: Production branch (defaults to the repository default branch)
+  deploy_platform:
+    description: Deployment backend, classic or deno2
+    default: classic
+  deno_org:
+    description: Deno 2 organization
+    default: ubiquity-dao
+  deno_token:
+    description: Deno Deploy token, required only for branch deletion
+outputs:
+  preview_project:
+    description: Branch-specific project to pass as preview_project to the reusable workflow
+  branch:
+    description: Source branch, including for pull requests and deletion events
+  deploy:
+    description: Whether to run the deployment job (true or false)
+runs:
+  using: node20
+  main: index.mjs
