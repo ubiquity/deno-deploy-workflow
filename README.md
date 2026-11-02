@@ -8,7 +8,7 @@ This repository provides a standardized, reusable Deno Deploy workflow at `.gith
 - Supports new Deno Deploy (`deno deploy`, `.deno.net`) via `deploy_platform: deno2`; Deploy Classic (`deployctl`, `.deno.dev`) remains the default during migration.
 - Optional Node.js and Bun setup for builds (uses official install scripts).
 - Configurable install/build commands (multi-line supported).
-- Branch-aware deployments: production on specified branch (default: `development`), preview on others.
+- Branch-aware deployments: production on the repository default branch, with isolated branch previews and deletion cleanup using the helper action in the template below.
 - Automatic preview project creation if missing.
 - Optional project existence check. `project_secrets` are forwarded as runtime env for the deploy (Deno Deploy secrets API is no longer supported).
 - Gitignore-based excludes with custom includes for build outputs.
@@ -28,9 +28,32 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  delete:
+
+# Serialize pushes and deletions of the same branch, including PR head branches.
+concurrency:
+  group: deno-${{ github.workflow }}-${{ github.event_name == 'delete' && github.event.ref || github.head_ref || github.ref_name }}
+  cancel-in-progress: true
 
 jobs:
+  preview:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      deploy: ${{ steps.target.outputs.deploy }}
+      project: ${{ steps.target.outputs.preview_project }}
+    steps:
+      # No checkout: deleted branches no longer exist and fork code must not run with secrets.
+      - uses: ubiquity/deno-deploy-workflow/actions/branch-preview@main
+        id: target
+        with:
+          project: <subdomain>-ubq-fi
+          deno_token: ${{ secrets.DENO_DEPLOY_TOKEN }}
+
   deploy:
+    needs: preview
+    if: needs.preview.outputs.deploy == 'true'
     permissions:
       contents: read
       issues: write
@@ -39,13 +62,12 @@ jobs:
     with:
       project: <subdomain>-ubq-fi
       entrypoint: serve.ts
-      prod_branch: development
+      preview_project: ${{ needs.preview.outputs.project }}
       # Add build-specific inputs as needed (bun_version, node_version, install_command, build_command, include, runtime_env, build_env)
       project_secrets: |
         SUPABASE_URL=SUPABASE_URL
         SUPABASE_ANON_KEY=SUPABASE_ANON_KEY
-    secrets:
-      DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
+    secrets: inherit
 ```
 
 Notes:
@@ -67,6 +89,33 @@ Notes:
 - `forward_all_secrets: true` (opt-in) forwards all available GitHub secrets as runtime env vars; defaults exclude `DENO_DEPLOY_TOKEN` and `GITHUB_TOKEN`.
 - In Deno 2 mode, quota GC is enabled by default only after app creation fails with an app quota/limit error. It deletes one generated preview/branch app, then retries creation once. Production apps, the current target app, and explicitly protected apps are never deleted.
 - Secrets managed in GitHub UI—update secret, next deploy forwards it.
+
+### Isolated branch previews and cleanup
+
+The `actions/branch-preview` helper above supplies `preview_project` to the existing reusable workflow, which creates the project/app as usual. Production keeps its existing project and hostname. Direct workflow calls that do not use the helper retain the legacy shared preview behavior.
+
+Each branch gets a DNS-safe prefix, an eight-character hash of the original branch and production project, and the `-ubq-fi` suffix required by the router. Names are clamped to 26 characters, preserving a shortened app name where possible. For example, `feat/widget` for `pay-ubq-fi` produces `feat-w-<hash>-pay-ubq-fi`, served at `feat-w-<hash>-pay.ubq.fi` by the standard subdomain router. The hash is always present so slash/dash aliases, case differences, and truncated names do not share previews. Reserved router prefixes (`preview-` and `os-`) are escaped with `b-`.
+
+Keep `delete` in the **calling repository's default-branch workflow**: reusable workflows cannot subscribe to the caller's events themselves. The helper uses the deletion payload's `ref`, not `github.ref_name`, and deletes only that branch's generated project. It also handles deleted-branch push events. Tag events and default/production branch deletion never deploy or delete projects; missing previews are already clean. Cleanup failures fail the job instead of silently leaking projects. Production is gated on the repository default branch unless `prod_branch` is set to the same value on **both** the helper and reusable workflow.
+
+For Deno 2, pass `deploy_platform: deno2` and the same `deno_org` to **both** the helper and reusable workflow. Add this step **before** the helper so cleanup can use the same Deno SDK as the reusable workflow:
+
+```yaml
+- uses: denoland/setup-deno@v2
+  if: github.event_name == 'delete' || github.event.deleted == true
+  with:
+    deno-version: v2.x
+```
+
+The helper resolves same-repository PRs from their head branch (and artifact `workflow_run` events from `head_branch`), never from a PR merge ref. Direct fork PRs and fork artifact runs are skipped by this helper to prevent them from targeting another branch's project. Keep the separate fork artifact pipeline below if fork previews are needed; fork branch deletion events are not delivered to the upstream repository.
+
+Local helper checks (no dependencies or network required):
+
+```sh
+node --test actions/branch-preview/index.test.mjs
+deno fmt --check actions/branch-preview
+deno lint actions/branch-preview
+```
 
 ### Deno 2 Quota GC
 
