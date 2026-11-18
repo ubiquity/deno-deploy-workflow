@@ -360,3 +360,116 @@ test("production and tag deletion need no token and never call the deployment AP
     }
   }
 });
+
+/** @param {Record<string, string>} env */
+function deployedUrls(env) {
+  const workflow = readFileSync(
+    new URL(
+      "../../.github/workflows/deno-deploy-reusable.yml",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const script = workflow.match(
+    / {6}- name: Compute deployed URLs\n[\s\S]*? {8}run: \|\n([\s\S]*?)(?=\n {6}- name:)/,
+  )?.[1];
+  assert.ok(script, "Compute deployed URLs must have a Bash run step");
+  const dir = mkdtempSync(
+    fileURLToPath(new URL(".test-urls-", import.meta.url)),
+  );
+  const output = join(dir, "output");
+  try {
+    const result = spawnSync("bash", ["-c", script], {
+      encoding: "utf8",
+      env: {
+        PROJECT: "pay-ubq-fi",
+        PREVIEW_PROJECT: "",
+        MODE: "preview",
+        TARGET_PROJECT: "p-pay-ubq-fi",
+        DEPLOY_PLATFORM: "classic",
+        DENO_DEPLOY_ORG: "ubiquity",
+        DEPLOYMENT_URL: "",
+        ...env,
+        GITHUB_OUTPUT: output,
+      },
+    });
+    assert.equal(result.status, 0, result.error?.message || result.stderr);
+    return Object.fromEntries(
+      readFileSync(output, "utf8").trim().split("\n").map((line) => {
+        const separator = line.indexOf("=");
+        return [line.slice(0, separator), line.slice(separator + 1)];
+      }),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("workflow reports branch router hosts for subdomain, root, and clamped previews", () => {
+  for (
+    const project of ["pay-ubq-fi", "ubq-fi", "abcdefghijklmnopqrs-ubq-fi"]
+  ) {
+    const preview = previewProject(project, "feat/widget");
+    for (const platform of ["classic", "deno2"]) {
+      const urls = deployedUrls({
+        PROJECT: project,
+        PREVIEW_PROJECT: preview,
+        TARGET_PROJECT: preview,
+        DEPLOY_PLATFORM: platform,
+      });
+      const projectUrl = platform === "deno2"
+        ? `https://${preview}.ubiquity.deno.net`
+        : `https://${preview}.deno.dev`;
+      assert.deepEqual(urls, {
+        project_url: projectUrl,
+        deployment_url: projectUrl,
+        router_url: `https://${preview.slice(0, -7)}.ubq.fi`,
+        url: projectUrl,
+      });
+    }
+  }
+});
+
+test("workflow retains legacy preview and production router URLs", () => {
+  for (
+    const [project, target, router] of [
+      ["pay-ubq-fi", "p-pay-ubq-fi", "https://preview-pay.ubq.fi"],
+      ["ubq-fi", "p-ubq-fi", ""],
+      [
+        "abcdefghijklmnopqrs-ubq-fi",
+        "p-abcdefghijkl-1234-ubq-fi",
+        "https://preview-abcdefghijklmnopqrs.ubq.fi",
+      ],
+    ]
+  ) {
+    assert.equal(
+      deployedUrls({ PROJECT: project, TARGET_PROJECT: target }).router_url,
+      router,
+    );
+    assert.equal(
+      deployedUrls({
+        PROJECT: project,
+        PREVIEW_PROJECT: previewProject(project, "feat/widget"),
+        TARGET_PROJECT: project,
+        MODE: "production",
+      }).router_url,
+      project === "ubq-fi"
+        ? "https://ubq.fi"
+        : `https://${project.slice(0, -7)}.ubq.fi`,
+    );
+  }
+});
+
+test("workflow uses the resolved preview target and preserves deployment URLs", () => {
+  const urls = deployedUrls({
+    PREVIEW_PROJECT: "configured-ubq-fi",
+    TARGET_PROJECT: "resolved-ubq-fi",
+    DEPLOYMENT_URL: "https://deployment-123.deno.dev/?a=b",
+  });
+  assert.deepEqual(urls, {
+    project_url: "https://resolved-ubq-fi.deno.dev",
+    deployment_url: "https://deployment-123.deno.dev/?a=b",
+    router_url: "https://resolved.ubq.fi",
+    url: "https://deployment-123.deno.dev/?a=b",
+  });
+});
