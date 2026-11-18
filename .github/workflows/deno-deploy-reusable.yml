@@ -1482,7 +1482,9 @@ jobs:
           router_url=""
 
           base=""
-          if [ "$prod_project" = "ubq-fi" ]; then
+          if [ "$mode" = "preview" ] && [ -n "${PREVIEW_PROJECT:-}" ] && [[ "$target_project" == *-ubq-fi ]]; then
+            router_url="https://${target_project%-ubq-fi}.ubq.fi"
+          elif [ "$prod_project" = "ubq-fi" ]; then
             if [ "$mode" = "production" ]; then
               router_url="https://ubq.fi"
             fi
